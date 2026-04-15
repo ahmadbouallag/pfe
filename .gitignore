@@ -1,0 +1,29 @@
+# Build directories
+build/
+build-*/
+
+# Qt Creator
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.autosave
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Ninja
+.ninja_log
+.ninja_deps
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.dll
+
+# OS files
+.DS_Store
+Thumbs.db
