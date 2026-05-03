@@ -1,0 +1,973 @@
+UDoc: The Universal Document Engine
+Architectural Specification v1.0
+________________________________________
+1. PHILOSOPHY & CORE THESIS
+Thesis: Every document format, at its visual essence, is a container hierarchy — pages holding elements, slides holding shapes, sheets holding cells, flows holding blocks. The differences are not in the fundamental structure but in three dimensions:
+Table 
+Dimension	PDF	DOCX	HTML	XLSX	PPTX
+Container type	Fixed page	Paginated flow	Infinite flow	Grid	Slide
+Element geometry	Absolute	Mixed (flow + anchored)	Flow + positioned	Grid cell	Absolute
+Reflow behavior	None	Full	Full	Structural	None
+UDoc's mission is to unify at the container-element level while preserving each format's unique presentation semantics through adapter layers.
+The Tab Principle: A UDoc document is a workspace containing multiple tabs. Each tab is an independent document view — pages, slides, spreadsheets, or infinite canvases. This mirrors how users actually work: one tab for the report, one for the appendix, one for the data tables. Other formats (DOCX, PDF) are single-tab subsets of this model.
+________________________________________
+
+
+
+
+
+
+
+2. THE THREE-LAYER ARCHITECTURE
+┌─────────────────────────────────────────────────────────────┐
+│  LAYER 3: PRESENTATION (Format-Specific Rendering)          │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐          │
+│  │  Page   │ │  Slide  │ │  Sheet  │ │  Flow   │          │
+│  │  View   │ │  View   │ │  View   │ │  View   │          │
+│  │(PDF/DOCX)│ │ (PPTX)  │ │ (XLSX)  │ │(HTML/EPUB)│        │
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘          │
+│       └─────────────┴─────────┴─────────────┘             │
+│                    ↑ Layout Engine                          │
+├─────────────────────────────────────────────────────────────┤
+│  LAYER 2: CONTENT (Universal Document Model)                │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  DOCUMENT                                           │   │
+│  │  ├── Tab[0]: "Report" → PageSequence               │   │
+│  │  │   ├── Page 0 → [Element, Element, ...]          │   │
+│  │  │   ├── Page 1 → [Element, Element, ...]          │   │
+│  │  │   └── ...                                       │   │
+│  │  ├── Tab[1]: "Appendix" → PageSequence              │   │
+│  │  ├── Tab[2]: "Data" → GridSheet                     │   │
+│  │  └── Tab[3]: "Slides" → SlideSequence               │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ELEMENT TYPES (universal):                                 │
+│  ├── TextBlock (flowing text with inline formatting)        │
+│  ├── Heading (outline level, TOC anchor)                   │
+│  ├── List (bulleted/numbered, nested)                        │
+│  ├── Table (grid of cells, each cell contains Elements)    │
+│  ├── Image (raster + vector)                               │
+│  ├── Vector (SVG-like paths)                               │
+│  ├── Media (video/audio placeholder)                       │
+│  ├── Formula (math/equations)                                │
+│  ├── Link (internal/external, element-level or block-level)│
+│  ├── Bookmark (named anchor for navigation)                │
+│  ├── Field (auto-updating: page number, date, cross-ref)   │
+│  ├── Comment/Annotation (collaboration layer)              │
+│  └── Group (nested element container)                      │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│  LAYER 1: STORAGE (Serialization & Format I/O)             │
+│                                                             │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐         │
+│  │  UDoc   │ │  PDF    │ │  DOCX   │ │  HTML   │ ...     │
+│  │ Native  │ │ Parser/ │ │ Parser/ │ │ Parser/ │         │
+│  │ Format  │ │Exporter │ │Exporter │ │Exporter │         │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘         │
+└─────────────────────────────────────────────────────────────┘
+________________________________________
+3. THE UNIVERSAL CONTENT MODEL (LAYER 2)
+3.1 Document
+The root object. A document is a collection of tabs.
+class Document {
+    ID id;
+    std::vector<std::unique_ptr<Tab>> tabs;
+    std::unordered_map<ID, Tab*> tabMap;
+    
+    // Global metadata
+    DocumentMetadata metadata;
+    
+    // Cross-tab links (internal navigation graph)
+    LinkGraph internalLinks;
+    
+    // ID generation
+    ID nextId = 1;
+    
+    // State (not serialized)
+    ID activeTabId;
+    bool modified = false;
+};
+3.2 Tab
+A tab is a typed container that determines how its content is presented.
+cpp 
+Copy
+enum class TabType {
+    PageSequence,      // PDF, DOCX, ODF style
+    SlideSequence,     // PPTX style
+    GridSheet,         // XLSX style
+    InfiniteCanvas,    // Whiteboard/drawing mode
+    FlowDocument       // HTML/EPUB style (no pagination)
+};
+
+class Tab {
+    ID id;
+    QString name;
+    TabType type;
+    Color tabColor;           // UI hint
+    
+    // Content based on type
+    std::variant<
+        PageSequence,         // vector<Page>
+        SlideSequence,        // vector<Slide>
+        GridSheet,            // rows × cols grid
+        InfiniteCanvas,       // bounding box + elements
+        FlowDocument          // Story (blocks without page breaks)
+    > content;
+    
+    // Tab-level properties
+    PageLayout defaultLayout;  // For PageSequence tabs
+    ZoomState zoomState;
+    ViewState viewState;       // Scroll position, etc.
+    
+    // Tab can have its own header/footer (for page sequences)
+    std::optional<HeaderFooter> masterHeaderFooter;
+};
+3.3 Page (Container)
+The fundamental visual container. Pages exist in PageSequence and SlideSequence tabs. In FlowDocument tabs, pages are generated dynamically by the layout engine.
+class Page {
+    ID id;
+    Tab* parent;
+    
+    // Geometry (always in points: 1/72 inch)
+    double width, height;
+    
+    // Margins (content area = page - margins)
+    double marginTop, marginBottom, marginLeft, marginRight;
+    
+    // Background
+    Color backgroundColor;
+    std::optional<ImageElement> backgroundImage;
+    
+    // Content: ordered by z-index (paint order)
+    std::vector<std::unique_ptr<Element>> elements;
+    
+    // Master page reference (for inheritance)
+    std::optional<ID> masterPageId;
+    
+    // Header/footer for this page (overrides tab default)
+    std::optional<HeaderFooter> headerFooter;
+    
+    // Page-specific properties
+    PageOrientation orientation;
+    bool pageBreakBefore;
+    
+    // Spatial index (runtime, rebuilt on edit)
+    mutable SpatialIndex spatialIndex;
+    
+    // Render cache (runtime)
+    mutable PageCache cache;
+};
+3.4 Element (The Universal Atom)
+Every piece of content is an Element. Elements are geometry-optional — they have position/size for fixed layouts (PDF, slides) but not for flow layouts (Word, HTML).
+class Element : public UDocObject {
+    ID id;
+    Page* parent;             // nullptr for flow contexts
+    
+    // === GEOMETRY (optional, format-dependent) ===
+    // For fixed layouts: absolute position on page
+    // For flow layouts: computed during layout, not stored
+    std::optional<Rect> bounds;
+    std::optional<TransformMatrix> transform;
+    
+    // === Z-ORDER (for overlapping) ===
+    int32_t zIndex = 0;
+    
+    // === VISUAL PROPERTIES ===
+    double opacity = 1.0;
+    std::optional<ClipPath> clipPath;
+    bool visible = true;
+    
+    // === CONTENT (variant) ===
+    std::variant<
+        TextBlock,            // Flowing paragraph with inline runs
+        Heading,              // Outline level, TOC entry
+        List,                 // Bulleted/numbered with nested items
+        Table,                // Grid of cells
+        Image,                // Raster image
+        VectorGraphic,        // SVG-like paths
+        Media,                // Video/audio
+        Formula,              // MathML/LaTeX
+        Link,                 // Hyperlink or cross-reference
+        Bookmark,             // Named anchor
+        Field,                // Auto-updating field
+        Comment,              // Annotation/comment
+        Group                 // Nested elements
+    > content;
+    
+    // === EDITING STATE (runtime, not serialized) ===
+    bool selected = false;
+    bool locked = false;
+    bool editing = false;     // Text editing mode
+    
+    // === LINKS (this element as link source) ===
+    std::optional<LinkTarget> linkTarget;
+    
+    // === ANCHORING (for flow documents) ===
+    std::optional<AnchorProperties> anchor;  // inline, block, floating
+    
+    // Methods
+    Rect transformedBounds() const;
+    bool hitTest(const Point& p) const;
+    bool isFlowElement() const;  // No stored geometry
+    bool isFixedElement() const; // Has stored geometry
+};
+3.5 TextBlock (The Word Processor Element)
+The most complex element. Supports full inline formatting.
+struct TextBlock {
+    // The text is stored as a flat string
+    QString text;
+    
+    // Formatting is stored as runs (start, length, properties)
+    std::vector<InlineRun> runs;
+    
+    // Paragraph-level properties
+    ParagraphProperties paragraphProps;
+    
+    // Layout cache (runtime, invalidated on edit)
+    mutable TextLayoutCache layoutCache;
+};
+
+struct InlineRun {
+    uint32_t start;           // Index into TextBlock.text
+    uint32_t length;
+    
+    CharacterProperties props;
+    
+    // Embedded objects within the run (images, fields, formulas)
+    std::vector<EmbeddedObject> embedded;
+};
+
+struct ParagraphProperties {
+    // Spacing
+    double spaceBefore = 0;      // points
+    double spaceAfter = 0;
+    double lineSpacing = 1.15;   // multiplier
+    double firstLineIndent = 0;
+    double leftIndent = 0;
+    double rightIndent = 0;
+    
+    // Alignment
+    Alignment alignment = Alignment::Left;
+    
+    // Tabs
+    std::vector<TabStop> tabStops;
+    
+    // Typography
+    bool widowControl = true;
+    bool orphanControl = true;
+    bool keepWithNext = false;
+    bool keepLinesTogether = false;
+    bool pageBreakBefore = false;
+    
+    // Borders & shading
+    std::optional<ParagraphBorder> border;
+    std::optional<Shading> shading;
+    
+    // Numbering/list
+    std::optional<ListProperties> listProps;
+    
+    // Style reference
+    std::optional<QString> styleId;
+};
+3.6 Heading
+A specialized TextBlock with outline level and TOC integration.
+struct Heading {
+    TextBlock content;        // Inherits all text capabilities
+    int outlineLevel;         // 1 = H1, 2 = H2, etc.
+    bool includeInTOC;
+    QString bookmarkName;     // Auto-generated or custom
+};
+3.7 List
+cpp 
+Copy
+struct List {
+    ListType type;            // Bullet, Numbered, Checklist, etc.
+    std::vector<ListItem> items;
+    
+    // Numbering format: "1.", "(a)", "i.", etc.
+    QString numberFormat;
+    int startNumber = 1;
+};
+
+struct ListItem {
+    // Content: can be simple text or nested blocks
+    std::variant<
+        TextBlock,
+        std::vector<std::unique_ptr<Element>>  // Nested paragraphs, tables, etc.
+    > content;
+    
+    // Sub-list (nesting)
+    std::optional<std::unique_ptr<List>> subList;
+    
+    // Checkbox state (for checklists)
+    std::optional<bool> checked;
+};
+3.8 Table (The Universal Grid)
+Tables are recursive containers — each cell contains Elements.
+struct Table {
+    uint32_t rows, cols;
+    
+    // Dimensions (points)
+    std::vector<double> rowHeights;   // Can be auto
+    std::vector<double> colWidths;    // Can be auto or percentage
+    
+    // Cells
+    std::vector<TableCell> cells;
+    
+    // Table-level properties
+    TableProperties props;
+};
+
+struct TableCell {
+    uint32_t row, col;
+    uint32_t rowSpan = 1;
+    uint32_t colSpan = 1;
+    
+    // Content: any elements
+    std::vector<std::unique_ptr<Element>> content;
+    
+    // Cell properties
+    CellProperties props;
+};
+
+struct TableProperties {
+    double borderWidth = 0.5;
+    Color borderColor{0, 0, 0, 1};
+    
+    // Header rows (repeat on new pages)
+    uint32_t headerRows = 0;
+    
+    // Alignment
+    TableHAlignment hAlign = TableHAlignment::Left;
+    
+    // Auto-fit behavior
+    TableAutoFit autoFit = TableAutoFit::Auto;
+};
+3.9 Link (Internal & External)
+struct Link {
+    // Source: this element is the clickable region
+    // Target: where it goes
+    
+    LinkTarget target;
+    
+    // Visual style
+    Color color{0, 0, 1, 1};  // Blue default
+    bool underline = true;
+};
+
+struct LinkTarget {
+    enum class Type {
+        ExternalURL,        // https://...
+        DocumentInternal,   // Bookmark in this document
+        CrossTab,           // Another tab in this document
+        CrossPage,          // Specific page in this document
+        CrossElement,       // Specific element in this document
+        CrossDocument,      // Another UDoc file
+        Email,              // mailto:
+        File                // local file
+    } type;
+    
+    // Target specification
+    std::variant<
+        QString,            // URL, email, file path
+        ID,                 // Tab ID, Page ID, Element ID
+        BookmarkReference   // Named anchor
+    > target;
+    
+    // For cross-document links
+    std::optional<QString> documentPath;
+};
+3.10 Bookmark (Named Anchor)
+struct Bookmark {
+    QString name;           // Unique within document
+    QString description;
+    
+    // Bookmarks are attached to elements or positions
+    std::variant<
+        ID,                 // Element ID
+        struct {
+            ID pageId;
+            Point position;  // Position on page
+        }
+    > anchor;
+};
+3.11 Field (Auto-Updating)
+struct Field {
+    FieldType type;
+    
+    // Types:
+    // - PageNumber, PageCount, Date, Time, Author, Title
+    // - CrossReference (to heading, bookmark, figure, table)
+    // - Formula (spreadsheet-like calculation)
+    // - Conditional (if-then-else based on document state)
+    
+    QString format;         // Display format string
+    std::optional<QString> customValue;  // Override
+};
+
+enum class FieldType {
+    PageNumber,
+    PageCount,
+    Date,
+    Time,
+    DateTime,
+    Author,
+    Title,
+    Subject,
+    FileName,
+    FilePath,
+    CrossReference,
+    Formula,
+    Conditional,
+    Custom
+};
+3.12 Comment/Annotation
+struct Comment {
+    ID authorId;
+    QString authorName;
+    QDateTime timestamp;
+    QString text;
+    
+    // Annotation range (can span multiple elements)
+    std::vector<ID> targetElements;
+    std::optional<Rect> highlightRegion;  // Visual highlight
+    
+    // Reply threading
+    std::optional<ID> parentCommentId;
+    std::vector<ID> replyIds;
+    
+    // Status
+    CommentStatus status = CommentStatus::Active;
+    bool resolved = false;
+};
+________________________________________
+4. THE PRESENTATION LAYER (LAYER 3)
+4.1 PageSequence Tab (PDF/DOCX/ODF Style)
+struct PageSequence {
+    std::vector<std::unique_ptr<Page>> pages;
+    
+    // Pagination engine
+    std::unique_ptr<Paginator> paginator;
+    
+    // Layout template
+    PageLayout defaultLayout;
+    
+    // Master pages (templates)
+    std::unordered_map<ID, std::unique_ptr<Page>> masterPages;
+};
+Pagination Engine:
+class Paginator {
+public:
+    // Takes a FlowDocument (Story) and produces pages
+    std::vector<std::unique_ptr<Page>> paginate(const Story& story, 
+                                                 const PageLayout& layout);
+    
+    // Or: incremental pagination (add content, get pages)
+    void addBlock(std::unique_ptr<Block> block);
+    std::vector<Page*> getPages();
+    
+    // Repaginate after edit
+    void invalidateFrom(ID blockId);
+    
+private:
+    // Layout algorithm
+    void layoutBlock(Block* block, Page* currentPage, double& yCursor);
+    bool fitsOnPage(const Block* block, double availableHeight);
+    std::unique_ptr<Block> splitBlock(const Block* block, double availableHeight);
+};
+4.2 SlideSequence Tab (PPTX Style)
+struct SlideSequence {
+    std::vector<std::unique_ptr<Slide>> slides;
+    
+    // Slide master (background, placeholders)
+    std::unique_ptr<SlideMaster> master;
+    
+    // Transition effects
+    std::vector<SlideTransition> transitions;
+};
+
+struct Slide {
+    ID id;
+    double width, height;     // Usually 10" × 7.5" (standard) or 16:9
+    
+    // Background (solid, gradient, image)
+    SlideBackground background;
+    
+    // Elements (absolute positioning, like PDF)
+    std::vector<std::unique_ptr<Element>> elements;
+    
+    // Slide layout template reference
+    std::optional<ID> layoutId;
+    
+    // Animation sequence
+    std::vector<AnimationStep> animations;
+    
+    // Notes (speaker notes)
+    std::optional<TextBlock> notes;
+};
+4.3 GridSheet Tab (XLSX Style)
+struct GridSheet {
+    // Infinite grid (sparse storage)
+    std::unordered_map<uint64_t, std::unique_ptr<Cell>> cells;
+    
+    // Column/row metadata
+    std::unordered_map<uint32_t, ColumnProperties> columns;
+    std::unordered_map<uint32_t, RowProperties> rows;
+    
+    // Named ranges
+    std::unordered_map<QString, CellRange> namedRanges;
+    
+    // Formulas (dependency graph)
+    FormulaEngine formulaEngine;
+    
+    // View properties
+    GridViewState viewState;
+};
+
+struct Cell {
+    uint32_t row, col;
+    
+    // Content
+    std::variant<
+        double,           // Number
+        QString,          // Text
+        bool,             // Boolean
+        QDateTime,        // Date
+        FormulaCell,      // Formula
+        ErrorValue        // #REF!, #DIV/0!, etc.
+    > value;
+    
+    // Formatting
+    CellFormat format;
+    
+    // Merged cell reference
+    std::optional<uint64_t> mergeParent;  // Hash of top-left cell
+    
+    // Comments
+    std::vector<Comment> comments;
+};
+
+// Hash function for cell coordinates
+inline uint64_t cellHash(uint32_t row, uint32_t col) {
+    return (static_cast<uint64_t>(row) << 32) | col;
+}
+4.4 InfiniteCanvas Tab
+struct InfiniteCanvas {
+    // No fixed size — expands as elements are added
+    Rect contentBounds;  // Computed from elements
+    
+    // Zoom/pan state
+    double zoom = 1.0;
+    Point scrollOffset;
+    
+    // Elements (absolute positioning, infinite bounds)
+    std::vector<std::unique_ptr<Element>> elements;
+    
+    // Grid/snapping
+    bool showGrid = true;
+    double gridSize = 20.0;
+    bool snapToGrid = false;
+};
+4.5 FlowDocument Tab (HTML/EPUB Style)
+struct FlowDocument {
+    // Single continuous flow — no pages
+    Story story;
+    
+    // Section breaks (for styling, not pagination)
+    std::vector<SectionBreak> sections;
+    
+    // CSS-like stylesheet
+    StyleSheet stylesheet;
+    
+    // Viewport width determines layout
+    double viewportWidth = 612;  // Default "page width" for wrapping
+    
+    // Scroll position (runtime)
+    double scrollY = 0;
+};
+________________________________________
+5. THE LINK SYSTEM (Cross-Reference Architecture)
+Links are first-class citizens in UDoc. Every element can be a link source, and every identifiable location can be a link target.
+class LinkGraph {
+    // Bidirectional link index
+    std::unordered_map<ID, std::vector<LinkEdge>> outgoing;  // element → targets
+    std::unordered_map<ID, std::vector<LinkEdge>> incoming;  // target → sources
+    
+public:
+    void addLink(ID sourceElement, const LinkTarget& target);
+    void removeLink(ID sourceElement);
+    void updateTarget(ID sourceElement, const LinkTarget& newTarget);
+    
+    // Query
+    std::vector<LinkEdge> getLinksFrom(ID element);
+    std::vector<LinkEdge> getLinksTo(ID target);
+    
+    // Validation: find broken links
+    std::vector<BrokenLink> validate();
+    
+    // Navigation
+    bool followLink(ID sourceElement, DocumentViewport* viewport);
+};
+
+// UI Integration
+class LinkController {
+public:
+    // "Make link to..." dialog
+    void showLinkDialog(Element* source);
+    
+    // Pick target interactively
+    LinkTarget pickTarget(DocumentViewport* viewport);
+    
+    // Visual link indicators (underlines, hover preview)
+    void renderLinkIndicators(QPainter* painter, const Element* elem);
+    
+    // Link navigation history (back/forward)
+    void navigateTo(const LinkTarget& target);
+    void navigateBack();
+    void navigateForward();
+};
+________________________________________
+6. THE PARSER ARCHITECTURE
+
+// === BASE INTERFACE ===
+class FormatParser {
+public:
+    virtual ~FormatParser() = default;
+    
+    // Parse file → UDoc Document
+    virtual std::unique_ptr<Document> parse(const std::string& path) = 0;
+    
+    // Quick format detection (magic bytes, extension)
+    virtual bool canParse(const std::string& path) = 0;
+    
+    // Metadata extraction
+    virtual DocumentMetadata extractMetadata(const std::string& path) = 0;
+    
+    // Element extraction (your "advanced extraction" requirement)
+    virtual std::vector<ElementReference> extractElements(
+        const std::string& path,
+        const ExtractionFilter& filter
+    ) = 0;
+    
+    // Streaming parse (for large files)
+    virtual void parseStreaming(
+        const std::string& path,
+        std::function<void(std::unique_ptr<Page>)> pageCallback,
+        std::function<void(std::unique_ptr<Element>)> elementCallback
+    ) = 0;
+};
+
+// === EXTRACTION FILTER SYSTEM ===
+struct ExtractionFilter {
+    // Type filter
+    std::optional<std::set<ElementType>> types;
+    
+    // Content filter
+    std::optional<QString> textContains;
+    std::optional<QRegularExpression> textMatches;
+    
+    // Style filter
+    std::optional<QString> styleName;
+    std::optional<QString> styleId;
+    
+    // Spatial filter (PDF-specific)
+    std::optional<Rect> region;
+    
+    // Semantic filter
+    std::optional<std::set<SemanticType>> semantics;  // Quote, Caption, etc.
+    
+    // Size filter
+    std::optional<double> minWidth, maxWidth;
+    std::optional<double> minHeight, maxHeight;
+    
+    // Custom predicate
+    std::function<bool(const Element*)> predicate;
+};
+
+// === SEMANTIC EXTRACTION ===
+enum class SemanticType {
+    Heading,
+    Paragraph,
+    Quote,
+    Caption,
+    Footnote,
+    Endnote,
+    TableOfContents,
+    IndexEntry,
+    BibliographyEntry,
+    Abstract,
+    Acknowledgment,
+    Dedication
+};
+
+class SemanticExtractor {
+public:
+    // Detect semantic types from raw elements
+    std::vector<SemanticAnnotation> analyze(const Document& doc);
+    
+    // Quote detection (indented, italic, citation pattern)
+    std::vector<ElementReference> findQuotes(const Document& doc);
+    
+    // Figure/table caption detection
+    std::vector<ElementReference> findCaptions(const Document& doc);
+    
+    // TOC reconstruction
+    std::vector<TocEntry> buildTOC(const Document& doc);
+};
+________________________________________
+7. THE EXPORT ARCHITECTURE
+class FormatExporter {
+public:
+    virtual ~FormatExporter() = default;
+    
+    // Export document to file
+    virtual void exportDocument(const Document& doc, const std::string& path) = 0;
+    
+    // Fidelity analysis: what will be lost?
+    virtual FidelityReport checkFidelity(const Document& doc) = 0;
+    
+    // Partial export (selected elements only)
+    virtual void exportElements(
+        const Document& doc,
+        const std::vector<ID>& elementIds,
+        const std::string& path
+    ) = 0;
+};
+
+struct FidelityReport {
+    struct Loss {
+        QString description;
+        Severity severity;  // Warning, Critical
+        std::vector<ID> affectedElements;
+    };
+    
+    std::vector<Loss> losses;
+    bool canRoundTrip;  // Can parse → export → parse produce identical doc?
+};
+
+// === CONVERSION PIPELINE ===
+class DocumentConverter {
+public:
+    // Full conversion
+    bool convert(const std::string& sourcePath, 
+                 const std::string& targetPath,
+                 const ConversionOptions& options);
+    
+    // Extract + convert subset
+    bool extractAndConvert(
+        const std::string& sourcePath,
+        const ExtractionFilter& filter,
+        const std::string& targetPath
+    );
+    
+private:
+    std::unique_ptr<FormatParser> getParser(const std::string& path);
+    std::unique_ptr<FormatExporter> getExporter(const std::string& path);
+};
+________________________________________
+8. THE RENDERING ENGINE
+class RenderEngine {
+public:
+    // Main entry: render visible region
+    void renderViewport(QPainter* painter, 
+                        const ViewportState& view,
+                        Document* doc,
+                        ID activeTabId);
+    
+    // Tab-specific renderers
+    void renderPageSequence(QPainter* painter, 
+                           const PageSequence& pages,
+                           const ViewportState& view);
+    
+    void renderSlideSequence(QPainter* painter,
+                            const SlideSequence& slides,
+                            const ViewportState& view);
+    
+    void renderGridSheet(QPainter* painter,
+                        const GridSheet& sheet,
+                        const ViewportState& view);
+    
+    void renderFlowDocument(QPainter* painter,
+                           const FlowDocument& flow,
+                           const ViewportState& view);
+    
+    void renderInfiniteCanvas(QPainter* painter,
+                             const InfiniteCanvas& canvas,
+                             const ViewportState& view);
+
+private:
+    // Element renderers
+    void renderTextBlock(QPainter*, const TextBlock*, const Rect& bounds);
+    void renderHeading(QPainter*, const Heading*, const Rect& bounds);
+    void renderList(QPainter*, const List*, const Rect& bounds);
+    void renderTable(QPainter*, const Table*, const Rect& bounds);
+    void renderImage(QPainter*, const Image*, const Rect& bounds);
+    void renderVector(QPainter*, const VectorGraphic*, const Rect& bounds);
+    void renderLink(QPainter*, const Link*, const Rect& bounds);
+    void renderField(QPainter*, const Field*, const Rect& bounds);
+    void renderComment(QPainter*, const Comment*, const Rect& bounds);
+    
+    // Text layout (QTextLayout integration)
+    std::unique_ptr<QTextLayout> layoutTextBlock(const TextBlock*, double maxWidth);
+    
+    // Cache management
+    void invalidatePage(ID pageId);
+    void invalidateElement(ID elementId);
+    void invalidateAll();
+    
+    // Background thread
+    std::unique_ptr<BackgroundRenderThread> m_bgThread;
+    QMutex m_cacheMutex;
+};
+________________________________________
+9. THE EDITING SYSTEM
+9.1 Command Stack (Undo/Redo)
+
+class CommandStack : public QUndoStack {
+    // Enhanced with:
+    // - Command coalescing (drag operations)
+    // - Command grouping (beginMacro/endMacro)
+    // - Command serialization (for collaborative editing)
+};
+
+// Command types
+class InsertElementCmd;
+class DeleteElementCmd;
+class MoveElementCmd;
+class ResizeElementCmd;
+class ModifyTextCmd;        // Text editing
+class ApplyStyleCmd;        // Style changes
+class InsertPageCmd;
+class DeletePageCmd;
+class ReorderPagesCmd;
+class CreateLinkCmd;
+class BreakLinkCmd;
+class ConvertTabTypeCmd;    // PageSequence → FlowDocument, etc.
+9.2 Text Editing
+class TextEditor {
+public:
+    // Cursor management
+    void placeCursor(const Point& docPoint, Element* textElement);
+    void moveCursor(CursorMovement direction, bool extendSelection);
+    
+    // Input handling
+    void insertText(const QString& text);
+    void deleteText(bool forward);
+    void insertParagraphBreak();
+    
+    // Formatting
+    void applyCharacterFormat(const CharacterProperties& props);
+    void applyParagraphFormat(const ParagraphProperties& props);
+    
+    // Selection
+    void selectAll();
+    void selectWord();
+    void selectParagraph();
+    void extendSelectionTo(Point docPoint);
+    
+    // Clipboard
+    void cut();
+    void copy();
+    void paste();
+    
+    // Find/Replace
+    bool find(const QString& text, FindOptions options);
+    bool replace(const QString& find, const QString& replace, ReplaceOptions options);
+};
+9.3 Selection System
+struct Selection {
+    enum Type { None, SingleElement, MultiElement, TextRange, TableCells } type = None;
+    
+    // For element selection
+    std::vector<ID> elementIds;
+    ID pageId;  // Context page
+    
+    // For text selection
+    struct TextRange {
+        ID elementId;
+        uint32_t start, end;  // Character offsets
+    } textRange;
+    
+    // For table cell selection
+    struct CellRange {
+        ID tableId;
+        uint32_t startRow, startCol;
+        uint32_t endRow, endCol;
+    } cellRange;
+};
+________________________________________
+10. THE VIEWPORT & INPUT SYSTEM
+class DocumentViewport : public QWidget {
+    // Tab management
+    void switchTab(ID tabId);
+    void createTab(TabType type, const QString& name);
+    void closeTab(ID tabId);
+    
+    // View control (zoom, scroll)
+    void setZoom(double zoom, ZoomOrigin origin = ZoomOrigin::ViewportCenter);
+    void scrollTo(const Point& docPoint);
+    void scrollToElement(ID elementId);
+    void scrollToBookmark(const QString& name);
+    
+    // Selection
+    void selectElement(ID elementId);
+    void selectElements(const std::vector<ID>& ids);
+    void clearSelection();
+    
+    // Editing modes
+    void setMode(EditMode mode);  // View, Select, TextEdit, Draw, Pan
+    
+    // Tool activation
+    void startTextTool();
+    void startRectangleTool();
+    void startImageTool(const QString& path);
+    void startTableTool(uint32_t rows, uint32_t cols);
+    void startLinkTool();  // "Click source, then click target"
+    
+    // Input handlers (polymorphic based on tab type)
+    std::unique_ptr<InputHandler> m_inputHandler;
+};
+
+// Input handlers for different tab types
+class PageSequenceInputHandler;
+class SlideSequenceInputHandler;
+class GridSheetInputHandler;
+class FlowDocumentInputHandler;
+class InfiniteCanvasInputHandler;
+________________________________________
+11. FILE FORMAT (Native UDoc)
+// Binary format structure
+struct UDocFileHeader {
+    char magic[4] = {'U', 'D', 'O', 'C'};
+    uint16_t versionMajor = 1;
+    uint16_t versionMinor = 0;
+    uint64_t contentOffset;
+    uint64_t blobPoolOffset;
+    uint64_t indexOffset;
+    uint64_t checksum;
+};
+
+// Content: serialized Document object (MessagePack or custom)
+// Blob pool: images, fonts, embedded files
+// Index: quick lookup table for pages, elements, bookmarks
+________________________________________
+12. IMPLEMENTATION ROADMAP
+Table 
+Phase	Duration	Deliverable
+1. Core Model	3 weeks	Story/Block/Inline, Element variants, Tab system
+2. Render Engine	2 weeks	PageSequence renderer, text layout, caching
+3. Viewport	2 weeks	Input handling, selection, zoom/scroll, tools
+4. Commands	1 week	Full undo/redo, text editing, drag operations
+5. PDF Parser	3 weeks	PDF → PageSequence (text, images, vectors)
+6. PDF Exporter	2 weeks	PageSequence → PDF
+7. DOCX Parser	2 weeks	DOCX → Story → Paginator → PageSequence
+8. DOCX Exporter	2 weeks	PageSequence → Story → DOCX
+9. Link System	1 week	Internal links, navigation, link dialog
+10. Advanced Extraction	2 weeks	Semantic extraction, filters, conversion pipeline
+11. HTML/EPUB	2 weeks	FlowDocument tab, parser, exporter
+12. XLSX GridSheet	2 weeks	GridSheet tab, formula engine
+13. PPTX Slides	2 weeks	SlideSequence tab, animations
+14. Polish	2 weeks	Performance, fidelity reports, round-trip testing
+Total: 28 weeks (7 months) for full universal document engine.
+
