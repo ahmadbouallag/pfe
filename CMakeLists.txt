@@ -18,6 +18,8 @@ set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
         mainwindow.h
+        document_view.cpp
+        document_view.h
         ${TS_FILES}
 )
 
@@ -60,6 +62,11 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         tab.cpp
         document.h
         document.cpp
+        header_footer.h
+        render_engine.h
+        render_engine.cpp
+        document_view.h
+        document_view.cpp
     )
 # Define target properties for Android with Qt 6 as:
 #    set_property(TARGET udoc1 APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
