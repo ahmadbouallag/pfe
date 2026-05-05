@@ -18,8 +18,6 @@ set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
         mainwindow.h
-        document_view.cpp
-        document_view.h
         ${TS_FILES}
 )
 
@@ -65,13 +63,12 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         header_footer.h
         render_engine.h
         render_engine.cpp
+        selection.h
+        input_handler.h
+        input_handler.cpp
         document_view.h
         document_view.cpp
     )
-# Define target properties for Android with Qt 6 as:
-#    set_property(TARGET udoc1 APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
-#                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
-# For more information, see https://doc.qt.io/qt-6/qt-add-executable.html#target-creation
 
     qt_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
 else()
@@ -79,8 +76,6 @@ else()
         add_library(udoc1 SHARED
             ${PROJECT_SOURCES}
         )
-# Define properties for Android with Qt 5 after find_package() calls as:
-#    set(ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
     else()
         add_executable(udoc1
             ${PROJECT_SOURCES}
@@ -92,9 +87,6 @@ endif()
 
 target_link_libraries(udoc1 PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
-# Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
-# If you are developing for iOS or macOS you should consider setting an
-# explicit, fixed bundle identifier manually though.
 if(${QT_VERSION} VERSION_LESS 6.1.0)
   set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.example.udoc1)
 endif()

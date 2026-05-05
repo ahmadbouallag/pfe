@@ -97,16 +97,18 @@ void RenderEngine::renderPageSequence(QPainter* painter,
 
     painter->save();
 
-    // Walk pages top-to-bottom, accumulating Y in screen space
-    double screenY = pagePad - view.scrollOffset.y() * zoom;
+    // scrollOffset is already in screen pixels — do NOT multiply by zoom.
+    // Walk pages top-to-bottom accumulating Y in screen space.
+    double screenY = pagePad - view.scrollOffset.y();
 
     for (const auto& page : pages.pages) {
         const double pageW = page->width  * zoom;
         const double pageH = page->height * zoom;
 
-        // Centre the page horizontally in the viewport
+        // Centre the page horizontally in the viewport.
+        // Horizontal scroll shifts the centre point, also in screen pixels.
         double screenX = (visibleRect.width() - pageW) / 2.0
-                         - view.scrollOffset.x() * zoom;
+                         - view.scrollOffset.x();
 
         QRectF screenPageRect(screenX, screenY, pageW, pageH);
 
@@ -136,7 +138,9 @@ void RenderEngine::renderPageSequence(QPainter* painter,
         //     then draw it scaled into screenPageRect ---
         PageCache* cache = getPageCache(page->id());
         if (cache && cache->isValidFor(screenPageRect, zoom)) {
-            painter->drawPixmap(screenPageRect.topLeft(), cache->cachedPixmap);
+            QSize pixSize = cache->cachedPixmap.size();
+            painter->drawPixmap(screenPageRect, cache->cachedPixmap,
+                                QRectF(QPointF(0,0), QSizeF(pixSize)));
             m_stats.cacheHits++;
         } else {
             // Render at 1:1 document coordinates into a pixmap
@@ -567,20 +571,29 @@ void RenderEngine::renderSelection(QPainter* painter,
     if (!element || !element->bounds) return;
 
     painter->save();
+
     QRectF bounds = toQRectF(*element->bounds);
-    painter->setPen(QPen(Qt::blue, 2.0));
-    painter->setBrush(QColor(0, 120, 255, 40));
+
+    // Cosmetic pen = always 1 screen pixel regardless of zoom scale
+    QPen outlinePen(QColor(30, 120, 255));
+    outlinePen.setCosmetic(true);
+    painter->setPen(outlinePen);
+    painter->setBrush(QColor(30, 120, 255, 30));
     painter->drawRect(bounds);
 
-    const double hs = 8.0;
+    // Handles drawn INSET so they never extend outside element bounds.
+    // hs is in doc coords — small enough to look right at any zoom.
+    const double hs = 6.0;
     QRectF handles[4] = {
-                         { bounds.left()  - hs/2, bounds.top()    - hs/2, hs, hs },
-                         { bounds.right() - hs/2, bounds.top()    - hs/2, hs, hs },
-                         { bounds.left()  - hs/2, bounds.bottom() - hs/2, hs, hs },
-                         { bounds.right() - hs/2, bounds.bottom() - hs/2, hs, hs },
-                         };
+        { bounds.left(),       bounds.top(),        hs, hs },  // top-left
+        { bounds.right() - hs, bounds.top(),        hs, hs },  // top-right
+        { bounds.left(),       bounds.bottom() - hs, hs, hs }, // bottom-left
+        { bounds.right() - hs, bounds.bottom() - hs, hs, hs }, // bottom-right
+    };
     painter->setBrush(Qt::white);
-    painter->setPen(QPen(Qt::blue, 1.0));
+    QPen handlePen(QColor(30, 120, 255));
+    handlePen.setCosmetic(true);
+    painter->setPen(handlePen);
     for (const auto& h : handles) painter->drawRect(h);
 
     painter->restore();
