@@ -8,6 +8,7 @@
 #include "document.h"
 #include "selection.h"
 #include "input_handler.h"
+#include "commands.h"
 
 namespace UDoc {
 
@@ -76,6 +77,11 @@ public:
     RenderEngine& renderEngine() { return m_renderEngine; }
     const ViewportState& viewState() const { return m_viewState; }
 
+    // Command stack — undo/redo
+    CommandStack* commandStack() { return &m_commandStack; }
+    void undo() { m_commandStack.undo(); m_renderEngine.invalidateAll(); update(); }
+    void redo() { m_commandStack.redo(); m_renderEngine.invalidateAll(); update(); }
+
 signals:
     void selectionChanged(const Selection& selection);
     void modeChanged(EditMode mode);
@@ -112,6 +118,9 @@ private:
 
     // Rubber band widget for drag-select
     QRubberBand* m_rubberBand = nullptr;
+
+    // Command stack
+    CommandStack m_commandStack;
 };
 
 } // namespace UDoc

@@ -62,26 +62,52 @@ void DocumentView::setZoom(double zoom, std::optional<QPointF> screenOrigin) {
     zoom = qBound(0.05, zoom, 20.0);
     if (qFuzzyCompare(zoom, m_viewState.zoom)) return;
 
-    // Pick the anchor point on screen (cursor pos, or viewport centre)
-    QPointF anchor = screenOrigin.value_or(QPointF(width() / 2.0, height() / 2.0));
-
-    // The renderer places page content at:
-    //   screenPos = docPos * zoom - scrollOffset   (for vertical: +pagePad offset)
-    // So for any screen point:   docPos = (screenPos + scrollOffset) / zoom
-    // We want docPos to map to the same anchor after the zoom change.
-
     const double oldZoom = m_viewState.zoom;
+    QPointF anchor = screenOrigin.value_or(QPointF(width() / 2.0, height() / 2.0));
+    const double pagePad = 20.0;
 
-    // Doc coordinate under the anchor at the old zoom
-    QPointF docUnderAnchor = (anchor + m_viewState.scrollOffset) / oldZoom;
+    // === Vertical ===
+    // Page stack Y: screenY_of_content = pagePad - scrollOffset.y
+    // So: scrollOffset.y = pagePad - screenY_of_content
+    // Doc-Y under cursor (in page-stack doc space):
+    //   globalDocY = (anchor.y + scrollOffset.y - pagePad) / oldZoom
+    // After zoom, preserve globalDocY under anchor.y:
+    //   anchor.y = globalDocY * newZoom + pagePad - newScrollOffset.y
+    //   => newScrollOffset.y = globalDocY * newZoom + pagePad - anchor.y
+    double globalDocY = (anchor.y() + m_viewState.scrollOffset.y() - pagePad) / oldZoom;
+    double newScrollY = globalDocY * zoom + pagePad - anchor.y();
 
-    // Apply new zoom
+    // === Horizontal ===
+    // Page is horizontally centred: screenPageX = (W - pageW)/2 - scrollOffset.x
+    // where pageW = docPageWidth * zoom.
+    // Doc-X under cursor (page-local):
+    //   pageScreenX = (W - docPageWidth*oldZoom)/2 - scrollOffset.x
+    //   docX = (anchor.x - pageScreenX) / oldZoom
+    // After zoom, preserve docX under anchor.x:
+    //   anchor.x = docX * newZoom + newPageScreenX
+    //   newPageScreenX = (W - docPageWidth*newZoom)/2 - newScrollOffset.x
+    //   => newScrollOffset.x = (W - docPageWidth*newZoom)/2 - (anchor.x - docX*newZoom)
+    //
+    // We need docPageWidth. Get it from the active page, or fall back to 0
+    // (which keeps the page centred correctly even without a page).
+    double docPageWidth = 0;
+    if (m_document) {
+        Tab* tab = m_document->activeTab();
+        if (tab) {
+            if (auto* ps = tab->pageSequence()) {
+                if (!ps->pages.empty()) docPageWidth = ps->pages[0]->width;
+            }
+        }
+    }
+
+    double oldPageW   = docPageWidth * oldZoom;
+    double oldPageX   = (width() - oldPageW) / 2.0 - m_viewState.scrollOffset.x();
+    double docX       = (anchor.x() - oldPageX) / oldZoom;
+    double newPageW   = docPageWidth * zoom;
+    double newScrollX = (width() - newPageW) / 2.0 - (anchor.x() - docX * zoom);
+
     m_viewState.zoom = zoom;
-
-    // Adjust scrollOffset so docUnderAnchor still maps to anchor:
-    //   anchor = docUnderAnchor * newZoom - newScrollOffset
-    //   => newScrollOffset = docUnderAnchor * newZoom - anchor
-    m_viewState.scrollOffset = docUnderAnchor * zoom - anchor;
+    m_viewState.scrollOffset = QPointF(newScrollX, newScrollY);
 
     m_renderEngine.invalidateAll();
     emit zoomChanged(zoom);
@@ -372,6 +398,36 @@ void DocumentView::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void DocumentView::keyPressEvent(QKeyEvent* event) {
+    // Undo / Redo
+    if (event->matches(QKeySequence::Undo)) {
+        undo(); event->accept(); return;
+    }
+    if (event->matches(QKeySequence::Redo)) {
+        redo(); event->accept(); return;
+    }
+    // Delete selected elements
+    if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)
+        && !m_selection.isEmpty()) {
+        Tab* tab = m_document ? m_document->activeTab() : nullptr;
+        if (tab) {
+            if (auto* ps = tab->pageSequence()) {
+                m_commandStack.beginMacro("Delete Elements");
+                for (ID id : m_selection.elementIds) {
+                    for (auto& page : ps->pages) {
+                        if (page->findElement(id)) {
+                            m_commandStack.run(new DeleteElementCmd(
+                                m_document, page->id(), id));
+                            break;
+                        }
+                    }
+                }
+                m_commandStack.endMacro();
+                clearSelection();
+            }
+        }
+        event->accept();
+        return;
+    }
     if (event->key() == Qt::Key_Escape) {
         clearSelection();
         event->accept();

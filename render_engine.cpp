@@ -90,66 +90,53 @@ void RenderEngine::renderViewport(QPainter* painter,
 void RenderEngine::renderPageSequence(QPainter* painter,
                                       const PageSequence& pages,
                                       const ViewportState& view) {
-    const double zoom       = view.zoom;
-    const double pagePad    = 20.0;          // gap between pages (screen px)
-    const double shadowOff  = 4.0;           // drop shadow offset (screen px)
+    const double zoom      = view.zoom;
+    const double pagePad   = 20.0;   // gap between pages (screen px)
+    const double shadowOff = 4.0;
     const QRectF visibleRect = view.visibleRect;
 
     painter->save();
 
-    // scrollOffset is already in screen pixels — do NOT multiply by zoom.
-    // Walk pages top-to-bottom accumulating Y in screen space.
+    // scrollOffset is in screen pixels.
+    // Page Y: stacked top-to-bottom, scrollOffset.y shifts the whole stack.
+    // Page X: centred in viewport, scrollOffset.x shifts left/right.
     double screenY = pagePad - view.scrollOffset.y();
 
     for (const auto& page : pages.pages) {
         const double pageW = page->width  * zoom;
         const double pageH = page->height * zoom;
-
-        // Centre the page horizontally in the viewport.
-        // Horizontal scroll shifts the centre point, also in screen pixels.
-        double screenX = (visibleRect.width() - pageW) / 2.0
-                         - view.scrollOffset.x();
+        const double screenX = (visibleRect.width() - pageW) / 2.0
+                               - view.scrollOffset.x();
 
         QRectF screenPageRect(screenX, screenY, pageW, pageH);
 
-        // Skip pages that are completely outside the visible area
-        if (!visibleRect.intersects(screenPageRect.adjusted(-shadowOff - 1,
-                                                            -shadowOff - 1,
-                                                            shadowOff + 1,
-                                                            shadowOff + 1))) {
+        if (!visibleRect.intersects(screenPageRect.adjusted(
+                -shadowOff-1, -shadowOff-1, shadowOff+1, shadowOff+1))) {
             screenY += pageH + pagePad;
             continue;
         }
 
-        // --- Drop shadow ---
+        // Drop shadow + background + border
         painter->fillRect(screenPageRect.translated(shadowOff, shadowOff),
                           QColor(0, 0, 0, 60));
-
-        // --- Page background ---
         painter->fillRect(screenPageRect,
                           RenderHelpers::toQColor(page->backgroundColor));
-
-        // --- Page border ---
         painter->setPen(QPen(QColor(160, 160, 160), 1.0));
         painter->setBrush(Qt::NoBrush);
         painter->drawRect(screenPageRect);
 
-        // --- Render elements into an offscreen pixmap at document coords,
-        //     then draw it scaled into screenPageRect ---
+        // Render page content.
+        // IMPORTANT: render at SCREEN resolution (zoom applied), not 1:1 doc
+        // coords. This gives crisp text/graphics at any zoom level.
+        // The painter is clipped to screenPageRect so elements can't bleed out.
         PageCache* cache = getPageCache(page->id());
         if (cache && cache->isValidFor(screenPageRect, zoom)) {
-            QSize pixSize = cache->cachedPixmap.size();
-            painter->drawPixmap(screenPageRect, cache->cachedPixmap,
-                                QRectF(QPointF(0,0), QSizeF(pixSize)));
+            painter->drawPixmap(screenPageRect.topLeft(), cache->cachedPixmap);
             m_stats.cacheHits++;
         } else {
-            // Render at 1:1 document coordinates into a pixmap
-            QSize pixSize(static_cast<int>(page->width),
-                          static_cast<int>(page->height));
-            if (pixSize.isEmpty()) {
-                screenY += pageH + pagePad;
-                continue;
-            }
+            QSize pixSize(static_cast<int>(std::ceil(pageW)),
+                          static_cast<int>(std::ceil(pageH)));
+            if (pixSize.isEmpty()) { screenY += pageH + pagePad; continue; }
 
             QPixmap pagePixmap(pixSize);
             pagePixmap.fill(Qt::transparent);
@@ -158,14 +145,16 @@ void RenderEngine::renderPageSequence(QPainter* painter,
                 QPainter pagePainter(&pagePixmap);
                 pagePainter.setRenderHint(QPainter::Antialiasing);
                 pagePainter.setRenderHint(QPainter::TextAntialiasing);
+                pagePainter.setRenderHint(QPainter::SmoothPixmapTransform);
 
-                // Background image
+                // Scale painter so element bounds (doc coords) map to screen px
+                pagePainter.scale(zoom, zoom);
+
                 if (page->backgroundImage) {
                     QRectF docRect(0, 0, page->width, page->height);
                     renderImage(&pagePainter, &(*page->backgroundImage), docRect);
                 }
 
-                // Elements
                 for (const auto& element : page->elements) {
                     renderElement(&pagePainter, element.get(), view);
                 }
@@ -173,10 +162,8 @@ void RenderEngine::renderPageSequence(QPainter* painter,
                 pagePainter.end();
             }
 
-            // Cache and draw
             updatePageCache(page->id(), pagePixmap, screenPageRect, zoom);
-            painter->drawPixmap(screenPageRect, pagePixmap,
-                                QRectF(QPointF(0, 0), QSizeF(pixSize)));
+            painter->drawPixmap(screenPageRect.topLeft(), pagePixmap);
             m_stats.cacheMisses++;
             m_stats.pagesRendered++;
         }

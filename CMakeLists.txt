@@ -64,6 +64,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         render_engine.h
         render_engine.cpp
         selection.h
+        commands.h
         input_handler.h
         input_handler.cpp
         document_view.h

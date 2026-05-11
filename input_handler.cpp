@@ -1,4 +1,5 @@
 #include "input_handler.h"
+#include "commands.h"
 #include "document_view.h"
 #include "document.h"
 #include "page.h"
@@ -214,7 +215,59 @@ void PageSequenceInputHandler::mouseReleaseEvent(QMouseEvent* event) {
 
     if (m_draggingElement) {
         m_draggingElement = false;
-        // TODO Phase 4: wrap the move in an UndoCommand so it's undoable
+
+        // Wrap the completed drag into a MoveElementCmd so it's undoable.
+        const Selection& sel = m_view->selection();
+        Document* doc = m_view->document();
+        Tab* tab = doc ? doc->activeTab() : nullptr;
+
+        if (tab && !sel.isEmpty()) {
+            QPointF screenDelta = event->position() - m_dragStartScreen;
+            double zoom = m_view->viewState().zoom;
+            double dx = screenDelta.x() / zoom;
+            double dy = screenDelta.y() / zoom;
+
+            std::vector<MoveElementCmd::Entry> entries;
+            if (auto* ps = tab->pageSequence()) {
+                for (auto& page : ps->pages) {
+                    for (ID id : sel.elementIds) {
+                        if (Element* elem = page->findElement(id)) {
+                            if (elem->bounds) {
+                                QPointF oldPos(m_dragStartDocPos.x,
+                                               m_dragStartDocPos.y);
+                                QPointF newPos(m_dragStartDocPos.x + dx,
+                                               m_dragStartDocPos.y + dy);
+                                entries.push_back({page->id(), id, oldPos, newPos});
+                            }
+                        }
+                    }
+                }
+            }
+            if (!entries.empty()) {
+                // The elements are already at newPos from the live drag preview.
+                // Push the command without re-executing redo (positions already applied).
+                // We do this by calling push directly — QUndoStack::push calls redo(),
+                // which would double-apply. So we restore old positions first, then push.
+                if (auto* ps = tab->pageSequence()) {
+                    for (auto& e : entries) {
+                        if (Page* page = ps->findPage(e.pageId)) {
+                            if (Element* elem = page->findElement(e.elementId)) {
+                                if (elem->bounds) {
+                                    elem->bounds->x = e.oldPos.x();
+                                    elem->bounds->y = e.oldPos.y();
+                                }
+                            }
+                        }
+                    }
+                }
+                // Now push (which calls redo and re-applies newPos cleanly)
+                m_view->commandStack()->run(
+                    new MoveElementCmd(doc, entries));
+            }
+        }
+
+        m_view->renderEngine().invalidateAll();
+        m_view->update();
         event->accept();
         return;
     }

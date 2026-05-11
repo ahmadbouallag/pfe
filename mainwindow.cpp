@@ -10,70 +10,69 @@ using namespace UDoc;
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("UDoc — Universal Document Engine");
     resize(1200, 800);
-    
-    // Create document view widget
+
     m_documentView = new DocumentView(this);
     setCentralWidget(m_documentView);
-    
-    // Create a test document
+
     auto doc = std::make_unique<Document>();
-    
-    // Add a page sequence tab
+
     Tab* tab = doc->addTab(TabType::PageSequence, "Document 1");
     PageSequence* ps = tab->initPageSequence();
-    
-    // Add a page
+
     Page* page = ps->addPage(doc->generateId());
-    page->width = 800;
-    page->height = 600;
+    page->width  = 800;
+    page->height = 1000;
     page->backgroundColor = Color::white();
-    
-    // Add a text element
-    auto textElem = std::make_unique<Element>(doc->generateId());
-    textElem->bounds = Rect(100, 100, 400, 200);
-    TextBlockContent tc;
-    tc.setPlainText("Hello UDoc! This is the universal document engine.\n\nYou can see this text rendered on screen using the RenderEngine with QTextLayout integration.", CharacterProperties());
-    textElem->content = std::move(tc);
-    page->addElement(std::move(textElem));
-    
-    // Add a heading element
+
+    // --- Heading ---
+    // outlineLevel=1 → font size 24pt. One line ≈ 32px tall. Give it 40px height.
     auto headingElem = std::make_unique<Element>(doc->generateId());
-    headingElem->bounds = Rect(100, 50, 400, 50);
+    headingElem->bounds = Rect(100, 50, 600, 40);
     HeadingContent hc;
-    hc.text = "Welcome to UDoc";
+    CharacterProperties headingProps;
+    headingProps.fontSize  = 24.0;
+    headingProps.bold      = true;
+    headingProps.fontFamily = "Arial";
+    hc.setPlainText("Welcome to UDoc", headingProps);
     hc.outlineLevel = 1;
     headingElem->content = std::move(hc);
     page->addElement(std::move(headingElem));
-    
-    // Add a list element
+
+    // --- Text block ---
+    // Default font 12pt. Text wraps at width=600 → about 3 lines ≈ 60px.
+    auto textElem = std::make_unique<Element>(doc->generateId());
+    textElem->bounds = Rect(100, 110, 600, 65);
+    TextBlockContent tc;
+    tc.setPlainText(
+        "Hello UDoc! This is the universal document engine. "
+        "You can see this text rendered on screen using the "
+        "RenderEngine with QTextLayout integration.",
+        CharacterProperties());
+    textElem->content = std::move(tc);
+    page->addElement(std::move(textElem));
+
+    // --- List ---
+    // 3 items × 22px line height = 66px
     auto listElem = std::make_unique<Element>(doc->generateId());
-    listElem->bounds = Rect(100, 350, 400, 150);
+    listElem->bounds = Rect(100, 200, 600, 66);
     ListContent lc;
     lc.type = ListType::Bullet;
-    ListContent::Item item1;
-    item1.content = std::make_unique<Element>(doc->generateId());
-    TextBlockContent tc1;
-    tc1.setPlainText("First item", CharacterProperties());
-    item1.content->content = std::move(tc1);
-    lc.items.push_back(std::move(item1));
-    
-    ListContent::Item item2;
-    item2.content = std::make_unique<Element>(doc->generateId());
-    TextBlockContent tc2;
-    tc2.setPlainText("Second item", CharacterProperties());
-    item2.content->content = std::move(tc2);
-    lc.items.push_back(std::move(item2));
-    
-    ListContent::Item item3;
-    item3.content = std::make_unique<Element>(doc->generateId());
-    TextBlockContent tc3;
-    tc3.setPlainText("Third item", CharacterProperties());
-    item3.content->content = std::move(tc3);
-    lc.items.push_back(std::move(item3));
-    
+
+    auto makeItem = [&](const QString& text) {
+        ListContent::Item item;
+        item.content = std::make_unique<Element>(doc->generateId());
+        TextBlockContent itemTc;
+        itemTc.setPlainText(text, CharacterProperties());
+        item.content->content = std::move(itemTc);
+        return item;
+    };
+
+    lc.items.push_back(makeItem("First item"));
+    lc.items.push_back(makeItem("Second item"));
+    lc.items.push_back(makeItem("Third item"));
+
     listElem->content = std::move(lc);
     page->addElement(std::move(listElem));
-    
-    // Set the document to the view
+
     m_documentView->setDocument(doc.release());
 }
