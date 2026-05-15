@@ -50,7 +50,9 @@ void ContentStreamInterpreter::process(const std::vector<uint8_t>& data) {
             execOperator(it->raw);
             m_operandStack.clear();
         } else {
-            m_operandStack.push_back(*it);
+            // Cap operand stack to prevent unbounded growth on corrupt streams
+            if (m_operandStack.size() < 256)
+                m_operandStack.push_back(*it);
         }
         ++it;
     }
@@ -75,12 +77,14 @@ static int hexV(uint8_t c){
 std::vector<ContentStreamInterpreter::Token>
 ContentStreamInterpreter::tokenise(const std::vector<uint8_t>& data) {
     std::vector<Token> tokens;
+    tokens.reserve(std::min(data.size() / 2, (size_t)2000000)); // cap reserve
     size_t pos=0, sz=data.size();
+    const size_t kMaxTokens = 10000000; // 10M tokens — safety cap
 
     auto skipWS=[&]{while(pos<sz&&isWS(data[pos]))++pos;};
     auto skipComment=[&]{while(pos<sz&&data[pos]!='\n'&&data[pos]!='\r')++pos;};
 
-    while(pos<sz){
+    while(pos<sz && tokens.size() < kMaxTokens){
         skipWS(); if(pos>=sz)break;
         uint8_t c=data[pos];
         if(c=='%'){skipComment();continue;}
@@ -348,7 +352,9 @@ void ContentStreamInterpreter::op_setCMYK(double c,double m,double y,double k,bo
 //  Graphics state
 // ============================================================
 
-void ContentStreamInterpreter::op_q(){m_gsStack.push(m_gs);}
+void ContentStreamInterpreter::op_q(){
+    if (m_gsStack.size() < 256) m_gsStack.push(m_gs);
+}
 void ContentStreamInterpreter::op_Q(){if(!m_gsStack.empty()){m_gs=m_gsStack.top();m_gsStack.pop();}}
 void ContentStreamInterpreter::op_cm(double a,double b,double c,double d,double e,double f){
     m_gs.ctm=Matrix2D(a,b,c,d,e,f)*m_gs.ctm;

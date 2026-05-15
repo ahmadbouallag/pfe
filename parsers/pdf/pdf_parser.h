@@ -63,6 +63,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 namespace Pdf {
 
@@ -114,7 +115,8 @@ private:
     // Recursively collect all leaf page nodes (Type=Page) in order.
     void collectPages(const PdfObject& node,
                       std::vector<PdfObject>& pages,
-                      const PdfDict* inheritedResources = nullptr);
+                      const PdfDict* inheritedResources = nullptr,
+                      int depth = 0);
 
     // ---- per-page processing ----
     void buildPage(const PdfDict& pageDict,

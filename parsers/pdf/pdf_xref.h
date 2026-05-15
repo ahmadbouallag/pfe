@@ -8,6 +8,7 @@
 #include "pdf_object.h"
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <string>
 
@@ -33,7 +34,10 @@ public:
 
     PdfObject resolve(const PdfRef& ref);
     PdfObject resolve(uint32_t objNum, uint16_t gen = 0);
-    PdfObject deref(const PdfObject& obj);
+
+    // Safe deref: follows ref chains up to maxDepth hops.
+    // Breaks circular references instead of recursing forever.
+    PdfObject deref(const PdfObject& obj, int maxDepth = 16);
 
     const PdfDict& trailer() const { return m_table.trailer; }
     const std::vector<uint8_t>& raw() const { return *m_data; }
@@ -43,13 +47,18 @@ private:
     XrefTable m_table;
     std::unordered_map<uint32_t, PdfObject> m_cache;
 
+    // Guards against re-entrant object stream loading
+    std::unordered_set<uint32_t> m_loadingObjStm;
+
+    // Guards against re-entrant resolve (handles self-referencing objects)
+    std::unordered_set<uint32_t> m_resolving;
+
     uint64_t findStartXref() const;
     bool parseXrefTable(uint64_t offset, std::string& err);
     bool parseXrefStream(uint64_t offset, std::string& err);
     PdfObject parseIndirectObject(uint64_t offset);
     bool loadObjectStream(uint32_t stmObjNum, std::string& err);
 
-    // Tokeniser — all take byte-index into *m_data
     void skipWS(uint64_t& pos) const;
     void skipLine(uint64_t& pos) const;
     bool peekBytes(uint64_t pos, const char* expect, size_t len) const;
