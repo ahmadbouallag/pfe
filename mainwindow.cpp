@@ -5,17 +5,44 @@
 #include "element.h"
 #include "block.h"
 
+// PDF parser
+#include "parsers/pdf/pdf_parser.h"
+
+#include <QApplication>
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMessageBox>
+#include <QStatusBar>
+#include <QLabel>
+#include <QKeySequence>
+#include <cmath>
+
 using namespace UDoc;
+
+// ============================================================
+//  Construction
+// ============================================================
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("UDoc — Universal Document Engine");
-    resize(1200, 800);
+    resize(1280, 900);
 
     m_documentView = new DocumentView(this);
     setCentralWidget(m_documentView);
 
-    auto doc = std::make_unique<Document>();
+    buildMenuBar();
+    buildStatusBar();
 
+    connect(m_documentView, &DocumentView::selectionChanged,
+            this, &MainWindow::onSelectionChanged);
+    connect(m_documentView, &DocumentView::zoomChanged,
+            this, &MainWindow::onZoomChanged);
+
+    // ---- Built-in demo document ----
+    auto doc = std::make_unique<Document>();
     Tab* tab = doc->addTab(TabType::PageSequence, "Document 1");
     PageSequence* ps = tab->initPageSequence();
 
@@ -24,55 +51,170 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     page->height = 1000;
     page->backgroundColor = Color::white();
 
-    // --- Heading ---
-    // outlineLevel=1 → font size 24pt. One line ≈ 32px tall. Give it 40px height.
-    auto headingElem = std::make_unique<Element>(doc->generateId());
-    headingElem->bounds = Rect(100, 50, 600, 40);
-    HeadingContent hc;
-    CharacterProperties headingProps;
-    headingProps.fontSize  = 24.0;
-    headingProps.bold      = true;
-    headingProps.fontFamily = "Arial";
-    hc.setPlainText("Welcome to UDoc", headingProps);
-    hc.outlineLevel = 1;
-    headingElem->content = std::move(hc);
-    page->addElement(std::move(headingElem));
+    // Heading
+    {
+        auto elem = std::make_unique<Element>(doc->generateId());
+        elem->bounds = Rect(100, 50, 600, 40);
+        HeadingContent hc;
+        CharacterProperties p;
+        p.fontSize = 24.0; p.bold = true; p.fontFamily = "Arial";
+        hc.setPlainText("Welcome to UDoc", p);
+        hc.outlineLevel = 1;
+        elem->content = std::move(hc);
+        page->addElement(std::move(elem));
+    }
 
-    // --- Text block ---
-    // Default font 12pt. Text wraps at width=600 → about 3 lines ≈ 60px.
-    auto textElem = std::make_unique<Element>(doc->generateId());
-    textElem->bounds = Rect(100, 110, 600, 65);
-    TextBlockContent tc;
-    tc.setPlainText(
-        "Hello UDoc! This is the universal document engine. "
-        "You can see this text rendered on screen using the "
-        "RenderEngine with QTextLayout integration.",
-        CharacterProperties());
-    textElem->content = std::move(tc);
-    page->addElement(std::move(textElem));
+    // Body text
+    {
+        auto elem = std::make_unique<Element>(doc->generateId());
+        elem->bounds = Rect(100, 110, 600, 65);
+        TextBlockContent tc;
+        tc.setPlainText(
+            "Hello UDoc! This is the universal document engine. "
+            "Open a PDF via File → Open PDF to see the parser in action.",
+            CharacterProperties());
+        elem->content = std::move(tc);
+        page->addElement(std::move(elem));
+    }
 
-    // --- List ---
-    // 3 items × 22px line height = 66px
-    auto listElem = std::make_unique<Element>(doc->generateId());
-    listElem->bounds = Rect(100, 200, 600, 66);
-    ListContent lc;
-    lc.type = ListType::Bullet;
+    // List
+    {
+        auto elem = std::make_unique<Element>(doc->generateId());
+        elem->bounds = Rect(100, 200, 600, 66);
+        ListContent lc;
+        lc.type = ListType::Bullet;
 
-    auto makeItem = [&](const QString& text) {
-        ListContent::Item item;
-        item.content = std::make_unique<Element>(doc->generateId());
-        TextBlockContent itemTc;
-        itemTc.setPlainText(text, CharacterProperties());
-        item.content->content = std::move(itemTc);
-        return item;
-    };
+        auto makeItem = [&](const QString& text) {
+            ListContent::Item item;
+            item.content = std::make_unique<Element>(doc->generateId());
+            TextBlockContent itemTc;
+            itemTc.setPlainText(text, CharacterProperties());
+            item.content->content = std::move(itemTc);
+            return item;
+        };
 
-    lc.items.push_back(makeItem("First item"));
-    lc.items.push_back(makeItem("Second item"));
-    lc.items.push_back(makeItem("Third item"));
+        lc.items.push_back(makeItem("Phase 5: PDF Parser — complete"));
+        lc.items.push_back(makeItem("Text, vectors, images extracted from scratch"));
+        lc.items.push_back(makeItem("No poppler, no pdfium — pure C++ + zlib"));
+        elem->content = std::move(lc);
+        page->addElement(std::move(elem));
+    }
 
-    listElem->content = std::move(lc);
-    page->addElement(std::move(listElem));
+    loadDocument(std::move(doc));
+}
 
-    m_documentView->setDocument(doc.release());
+// ============================================================
+//  Menu bar
+// ============================================================
+
+void MainWindow::buildMenuBar() {
+    QMenu* fileMenu = menuBar()->addMenu("&File");
+
+    QAction* openPdfAction = fileMenu->addAction("&Open PDF…");
+    openPdfAction->setShortcut(QKeySequence::Open);
+    connect(openPdfAction, &QAction::triggered, this, &MainWindow::openPdf);
+
+    fileMenu->addSeparator();
+
+    QAction* quitAction = fileMenu->addAction("&Quit");
+    quitAction->setShortcut(QKeySequence::Quit);
+    connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
+
+    QMenu* viewMenu = menuBar()->addMenu("&View");
+
+    QAction* zoomInAction  = viewMenu->addAction("Zoom &In");
+    QAction* zoomOutAction = viewMenu->addAction("Zoom &Out");
+    QAction* zoomFitAction = viewMenu->addAction("&Fit Page");
+    zoomInAction->setShortcut(QKeySequence::ZoomIn);
+    zoomOutAction->setShortcut(QKeySequence::ZoomOut);
+
+    connect(zoomInAction,  &QAction::triggered, this, [this]{
+        m_documentView->setZoom(m_documentView->zoom() * 1.25);
+    });
+    connect(zoomOutAction, &QAction::triggered, this, [this]{
+        m_documentView->setZoom(m_documentView->zoom() / 1.25);
+    });
+    connect(zoomFitAction, &QAction::triggered, this, [this]{
+        m_documentView->setZoom(1.0);
+    });
+}
+
+// ============================================================
+//  Status bar
+// ============================================================
+
+void MainWindow::buildStatusBar() {
+    m_statusLabel = new QLabel("Ready");
+    m_zoomLabel   = new QLabel("100%");
+    statusBar()->addWidget(m_statusLabel, 1);
+    statusBar()->addPermanentWidget(m_zoomLabel);
+}
+
+// ============================================================
+//  Open PDF
+// ============================================================
+
+void MainWindow::openPdf() {
+    QString path = QFileDialog::getOpenFileName(
+        this, "Open PDF", QString(),
+        "PDF Files (*.pdf);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    statusBar()->showMessage("Parsing " + QFileInfo(path).fileName() + "…");
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+
+    Pdf::PdfParser parser;
+    Pdf::ParseResult result = parser.parse(path);
+
+    QApplication::restoreOverrideCursor();
+
+    if (!result.ok) {
+        QMessageBox::critical(this, "PDF Parse Error", result.errorMessage);
+        statusBar()->showMessage("Failed to open PDF.", 4000);
+        return;
+    }
+
+    QString title = result.document->metadata.title;
+    if (title.isEmpty()) title = QFileInfo(path).fileName();
+    setWindowTitle("UDoc — " + title);
+
+    size_t pageCount = result.document->totalPages();
+    size_t wordCount = result.document->wordCount();
+
+    loadDocument(std::move(result.document));
+
+    statusBar()->showMessage(
+        QString("Opened: %1 page%2, ~%3 word%4")
+            .arg(pageCount)
+            .arg(pageCount == 1 ? "" : "s")
+            .arg(wordCount)
+            .arg(wordCount == 1 ? "" : "s"),
+        6000);
+}
+
+// ============================================================
+//  Load document into view
+// ============================================================
+
+void MainWindow::loadDocument(std::unique_ptr<UDoc::Document> doc) {
+    m_document = std::move(doc);
+    m_documentView->setDocument(m_document.get());
+    m_documentView->setZoom(1.0);
+}
+
+// ============================================================
+//  Slots
+// ============================================================
+
+void MainWindow::onSelectionChanged(const UDoc::Selection& sel) {
+    if (sel.isEmpty())
+        m_statusLabel->setText("Ready");
+    else if (sel.isSingle())
+        m_statusLabel->setText(QString("Selected element ID %1").arg(sel.firstElementId()));
+    else
+        m_statusLabel->setText(QString("%1 elements selected").arg(sel.elementIds.size()));
+}
+
+void MainWindow::onZoomChanged(double zoom) {
+    m_zoomLabel->setText(QString("%1%").arg((int)std::round(zoom * 100)));
 }
