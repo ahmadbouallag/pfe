@@ -8,7 +8,6 @@
 
 namespace UDoc {
 
-// Forward declare for embedded objects
 struct ImageData;
 struct Formula;
 struct Field;
@@ -16,15 +15,12 @@ struct Field;
 struct EmbeddedObject {
     enum class Type { Image, Formula, Field, Symbol, Break } type;
     uint32_t textPosition = 0;
-
-    // Using shared_ptr for ImageData, raw pointers for others (owned elsewhere)
     std::variant<
         std::shared_ptr<ImageData>,
         Formula*,
         Field*,
         QChar
         > content;
-
     Size displaySize;
     VerticalAlignment baselineAlign = VerticalAlignment::Bottom;
 };
@@ -46,25 +42,67 @@ struct InlineRun {
     void shift(int delta);
 };
 
+// -----------------------------------------------------------------------
+// TextLayoutCache — holds both layout geometry AND text-editing state.
+// The render engine reads cursorPos/selStart/selEnd/cursorVisible
+// to draw the caret and selection highlight without any extra storage.
+// The input handler writes these fields directly.
+// -----------------------------------------------------------------------
 struct TextLayoutCache {
     bool valid = false;
+
     struct LineInfo {
-        uint32_t startChar;
-        uint32_t endChar;
-        double y;
-        double height;
-        double width;
+        uint32_t startChar = 0;
+        uint32_t endChar   = 0;
+        double   y         = 0;
+        double   height    = 0;
+        double   width     = 0;
     };
     std::vector<LineInfo> lines;
+
     struct GlyphPosition {
-        uint32_t charIndex;
-        double x;
-        double advance;
+        uint32_t charIndex = 0;
+        double   x         = 0;
+        double   advance   = 0;
     };
     std::vector<GlyphPosition> glyphs;
-    double totalWidth = 0;
+
+    double totalWidth  = 0;
     double totalHeight = 0;
-    void invalidate() { valid = false; lines.clear(); glyphs.clear(); }
+
+    // ---- Text editing state (written by InputHandler, read by RenderEngine) ----
+    uint32_t cursorPos    = 0;     // insertion caret, in char units
+    uint32_t selStart     = 0;     // selection start  (selStart == selEnd → no selection)
+    uint32_t selEnd       = 0;     // selection end    (exclusive)
+    bool     cursorVisible = false; // true when element is being edited
+    bool     hasSelection  = false; // convenience flag
+
+    void invalidate() {
+        valid = false;
+        lines.clear();
+        glyphs.clear();
+        // Note: do NOT reset cursor/selection here — those are editing state,
+        // not layout cache.  Only reset them when editing ends.
+    }
+
+    void clearSelection() {
+        selStart = selEnd = cursorPos;
+        hasSelection = false;
+    }
+
+    void setSelection(uint32_t start, uint32_t end) {
+        selStart = start;
+        selEnd   = end;
+        hasSelection = (start != end);
+    }
+
+    void resetEditing() {
+        cursorPos     = 0;
+        selStart      = 0;
+        selEnd        = 0;
+        cursorVisible = false;
+        hasSelection  = false;
+    }
 };
 
 } // namespace UDoc

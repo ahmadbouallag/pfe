@@ -43,9 +43,7 @@ void Block::insertText(uint32_t pos, const QString& text) {
             if (run.contains(pos)) {
                 auto newRun = run.splitAt(pos);
                 run.length += text.length();
-                if (newRun) {
-                    newRun->shift(text.length());
-                }
+                if (newRun) newRun->shift(text.length());
                 break;
             } else if (run.start >= pos) {
                 run.shift(text.length());
@@ -61,38 +59,34 @@ void Block::deleteText(uint32_t pos, uint32_t len) {
         auto it = tc->runs.begin();
         while (it != tc->runs.end()) {
             if (it->start >= pos + len) {
-                it->shift(-len);
-                ++it;
+                it->shift(-(int)len); ++it;
             } else if (it->end() <= pos) {
                 ++it;
             } else if (it->start >= pos && it->end() <= pos + len) {
                 it = tc->runs.erase(it);
             } else if (it->start < pos && it->end() > pos + len) {
-                it->length -= len;
-                ++it;
+                it->length -= len; ++it;
             } else if (it->start < pos) {
-                it->length = pos - it->start;
-                ++it;
+                it->length = pos - it->start; ++it;
             } else {
-                it->start = pos;
+                it->start  = pos;
                 it->length = it->end() - (pos + len);
-                it->shift(-len);
-                ++it;
+                it->shift(-(int)len); ++it;
             }
         }
         invalidateLayout();
     }
 }
 
-void Block::applyCharFormat(uint32_t start, uint32_t len, const CharacterProperties& props) {
+void Block::applyCharFormat(uint32_t start, uint32_t len,
+                             const CharacterProperties& props) {
     if (auto* tc = textContent()) {
         uint32_t end = start + len;
         tc->splitRunAt(start);
         tc->splitRunAt(end);
         for (auto& run : tc->runs) {
-            if (run.start >= start && run.end() <= end) {
+            if (run.start >= start && run.end() <= end)
                 run.props = props;
-            }
         }
         tc->coalesceRuns();
         invalidateLayout();
@@ -101,22 +95,28 @@ void Block::applyCharFormat(uint32_t start, uint32_t len, const CharacterPropert
 
 CharacterProperties Block::charFormatAt(uint32_t pos) const {
     if (auto* tc = textContent()) {
-        for (const auto& run : tc->runs) {
+        for (const auto& run : tc->runs)
             if (run.contains(pos)) return run.props;
-        }
     }
     return CharacterProperties();
 }
 
+// invalidateLayout now delegates to TextBlockContent::layoutCache
+// since that's where the cache lives (moved from Block to TextBlockContent
+// so Element-path text editing can access it without going through Block).
 void Block::invalidateLayout() const {
-    layoutCache.invalidate();
+    if (auto* tc = textContent())
+        tc->layoutCache.invalidate();
 }
 
 // === TEXT BLOCK CONTENT ===
-void TextBlockContent::setPlainText(const QString& t, const CharacterProperties& props) {
+
+void TextBlockContent::setPlainText(const QString& t,
+                                     const CharacterProperties& props) {
     text = t;
     runs.clear();
     if (!t.isEmpty()) runs.push_back(InlineRun(0, t.length(), props));
+    layoutCache.invalidate();
 }
 
 void TextBlockContent::coalesceRuns() {
@@ -124,7 +124,8 @@ void TextBlockContent::coalesceRuns() {
     auto it = runs.begin();
     while (it != runs.end() - 1) {
         auto next = it + 1;
-        if (it->end() == next->start && it->props == next->props &&
+        if (it->end()  == next->start &&
+            it->props  == next->props &&
             it->embedded.empty() && next->embedded.empty()) {
             it->length += next->length;
             it = runs.erase(next) - 1;

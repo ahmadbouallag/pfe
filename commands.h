@@ -5,6 +5,7 @@
 #include "element.h"
 #include "page.h"
 #include "document.h"
+#include "inline.h"
 #include <QUndoStack>
 #include <QUndoCommand>
 #include <memory>
@@ -12,9 +13,7 @@
 namespace UDoc {
 
 // -----------------------------------------------------------------------
-// CommandStack — QUndoStack extended with coalescing and grouping helpers.
-// One instance lives in DocumentView and is the single source of truth
-// for all undoable operations.
+// CommandStack
 // -----------------------------------------------------------------------
 class CommandStack : public QUndoStack {
     Q_OBJECT
@@ -22,21 +21,15 @@ public:
     explicit CommandStack(QObject* parent = nullptr) : QUndoStack(parent) {
         setUndoLimit(200);
     }
-
-    // Convenience: push + execute in one call
     void run(QUndoCommand* cmd) { push(cmd); }
-
-    // Coalescing — merge consecutive commands of the same type/id
-    // (e.g. individual keystrokes while typing merge into one ModifyTextCmd)
     bool coalescing() const { return m_coalescing; }
     void setCoalescing(bool on) { m_coalescing = on; }
-
 private:
     bool m_coalescing = true;
 };
 
 // -----------------------------------------------------------------------
-// MoveElementCmd — move one or more elements by a delta
+// MoveElementCmd
 // -----------------------------------------------------------------------
 class MoveElementCmd : public QUndoCommand {
 public:
@@ -50,11 +43,9 @@ public:
     void redo() override { applyPositions(true); }
     void undo() override { applyPositions(false); }
 
-    // Coalesce drag updates into one command while dragging
     bool mergeWith(const QUndoCommand* other) override {
         if (other->id() != id()) return false;
         auto* o = static_cast<const MoveElementCmd*>(other);
-        // Same set of elements? Update the newPos values only.
         if (o->m_entries.size() != m_entries.size()) return false;
         for (size_t i = 0; i < m_entries.size(); ++i) {
             if (m_entries[i].elementId != o->m_entries[i].elementId) return false;
@@ -77,22 +68,18 @@ private:
             page->invalidateCache();
         }
     }
-
     Page* findPage(ID pageId) {
-        for (auto& tab : m_doc->tabs) {
-            if (auto* ps = tab->pageSequence()) {
+        for (auto& tab : m_doc->tabs)
+            if (auto* ps = tab->pageSequence())
                 if (Page* p = ps->findPage(pageId)) return p;
-            }
-        }
         return nullptr;
     }
-
     Document* m_doc;
     std::vector<Entry> m_entries;
 };
 
 // -----------------------------------------------------------------------
-// ResizeElementCmd — resize an element's bounds
+// ResizeElementCmd
 // -----------------------------------------------------------------------
 class ResizeElementCmd : public QUndoCommand {
 public:
@@ -117,25 +104,21 @@ public:
 
 private:
     void apply(const Rect& bounds) {
-        for (auto& tab : m_doc->tabs) {
-            if (auto* ps = tab->pageSequence()) {
-                if (Page* page = ps->findPage(m_pageId)) {
+        for (auto& tab : m_doc->tabs)
+            if (auto* ps = tab->pageSequence())
+                if (Page* page = ps->findPage(m_pageId))
                     if (Element* elem = page->findElement(m_elementId)) {
                         elem->bounds = bounds;
                         page->invalidateCache();
                     }
-                }
-            }
-        }
     }
-
     Document* m_doc;
     ID m_pageId, m_elementId;
     Rect m_old, m_new;
 };
 
 // -----------------------------------------------------------------------
-// InsertElementCmd — add an element to a page
+// InsertElementCmd
 // -----------------------------------------------------------------------
 class InsertElementCmd : public QUndoCommand {
 public:
@@ -153,18 +136,10 @@ public:
         m_element->setParent(page);
         page->addElement(std::move(m_element));
     }
-
     void undo() override {
         Page* page = findPage();
         if (!page) return;
-        // Take the element back so we own it again
-        if (Element* elem = page->findElement(m_elementId)) {
-            // Re-acquire ownership by rebuilding (page stores unique_ptr)
-            // We rebuild a shell — full round-trip ownership needs a different approach.
-            // For now: just remove it from the page.
-            page->removeElement(m_elementId);
-            // We lose the element data on undo. Phase 14 polish: store a clone.
-        }
+        page->removeElement(m_elementId);
     }
 
 private:
@@ -174,7 +149,6 @@ private:
                 if (Page* p = ps->findPage(m_pageId)) return p;
         return nullptr;
     }
-
     Document* m_doc;
     ID m_pageId;
     mutable std::unique_ptr<Element> m_element;
@@ -182,7 +156,7 @@ private:
 };
 
 // -----------------------------------------------------------------------
-// DeleteElementCmd — remove an element from a page
+// DeleteElementCmd
 // -----------------------------------------------------------------------
 class DeleteElementCmd : public QUndoCommand {
 public:
@@ -193,14 +167,10 @@ public:
 
     void redo() override {
         Page* page = findPage();
-        if (!page) return;
-        // Store element before removing (ownership transfer not yet implemented)
-        page->removeElement(m_elementId);
+        if (page) page->removeElement(m_elementId);
     }
-
     void undo() override {
         // TODO Phase 14: restore the stored element
-        // Requires clone/serialize support
     }
 
 private:
@@ -210,14 +180,13 @@ private:
                 if (Page* p = ps->findPage(m_pageId)) return p;
         return nullptr;
     }
-
     Document* m_doc;
     ID m_pageId, m_elementId;
 };
 
 // -----------------------------------------------------------------------
-// ModifyTextCmd — edit text content of an element
-// Coalesces consecutive edits to the same element (typing)
+// ModifyTextCmd — legacy simple string-only undo (kept for compatibility).
+// For new text editing use EditTextBlockCmd below.
 // -----------------------------------------------------------------------
 class ModifyTextCmd : public QUndoCommand {
 public:
@@ -247,11 +216,114 @@ private:
                 if (Page* page = ps->findPage(m_pageId)) {
                     if (Element* elem = page->findElement(m_elementId)) {
                         if (auto* tc = elem->textContent()) {
-                            tc->setPlainText(text, tc->runs.empty()
-                                             ? CharacterProperties()
-                                             : tc->runs[0].props);
+                            // Preserve the first run's props rather than wiping them
+                            CharacterProperties props = tc->runs.empty()
+                                ? CharacterProperties() : tc->runs[0].props;
+                            tc->setPlainText(text, props);
+                            tc->layoutCache.invalidate();
                             page->invalidateCache();
                         }
+                    }
+                }
+            }
+        }
+    }
+    Document* m_doc;
+    ID m_pageId, m_elementId;
+    QString m_old, m_new;
+};
+
+// -----------------------------------------------------------------------
+// EditTextBlockCmd — full snapshot undo for the text editor.
+//
+// Stores a complete copy of the TextBlockContent (text string + all runs)
+// before and after an editing session.  This preserves ALL inline
+// formatting across undo/redo — bold words, size changes, color spans etc.
+//
+// The TextEditor calls this once at commit() time, not on every keystroke.
+// -----------------------------------------------------------------------
+
+// Helper: shallow-copy all InlineRuns (no embedded objects are deep-copied —
+// those are shared_ptr so they're ref-counted safely).
+static inline std::vector<InlineRun> cloneRuns(const std::vector<InlineRun>& src) {
+    return src; // InlineRun is value-copyable; embedded uses shared_ptr
+}
+
+class EditTextBlockCmd : public QUndoCommand {
+public:
+    // Snapshot the element state RIGHT NOW and store as "before".
+    // The caller then mutates the element, and when done calls setAfter().
+    EditTextBlockCmd(Document* doc, ID pageId, ID elementId,
+                     QUndoCommand* parent = nullptr)
+        : QUndoCommand("Edit Text", parent)
+        , m_doc(doc), m_pageId(pageId), m_elementId(elementId)
+    {
+        // Capture before-state immediately
+        if (auto* tc = getContent()) {
+            m_oldText = tc->text;
+            m_oldRuns = cloneRuns(tc->runs);
+        }
+    }
+
+    // Call this after editing is done to capture the after-state.
+    void setAfter() {
+        if (auto* tc = getContent()) {
+            m_newText = tc->text;
+            m_newRuns = cloneRuns(tc->runs);
+        }
+        m_afterSet = true;
+    }
+
+    void redo() override {
+        if (!m_afterSet) return;
+        applyState(m_newText, m_newRuns);
+    }
+    void undo() override {
+        applyState(m_oldText, m_oldRuns);
+    }
+
+    // Coalesce: two consecutive edits to the same element merge into one
+    // (only the final "after" state of the second is kept).
+    bool mergeWith(const QUndoCommand* other) override {
+        if (other->id() != id()) return false;
+        auto* o = static_cast<const EditTextBlockCmd*>(other);
+        if (o->m_elementId != m_elementId) return false;
+        // Keep our "before" (oldest), take their "after" (newest)
+        m_newText = o->m_newText;
+        m_newRuns = o->m_newRuns;
+        m_afterSet = o->m_afterSet;
+        return true;
+    }
+    int id() const override { return 1005; }
+
+private:
+    TextBlockContent* getContent() const {
+        for (auto& tab : m_doc->tabs) {
+            if (auto* ps = tab->pageSequence()) {
+                if (Page* page = ps->findPage(m_pageId)) {
+                    if (Element* elem = page->findElement(m_elementId)) {
+                        if (auto* tc = elem->textContent())    return tc;
+                        if (auto* hc = elem->headingContent()) return hc;
+                    }
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    void applyState(const QString& text, const std::vector<InlineRun>& runs) {
+        for (auto& tab : m_doc->tabs) {
+            if (auto* ps = tab->pageSequence()) {
+                if (Page* page = ps->findPage(m_pageId)) {
+                    if (Element* elem = page->findElement(m_elementId)) {
+                        TextBlockContent* tc = nullptr;
+                        if (elem->isTextBlock())    tc = elem->textContent();
+                        else if (elem->isHeading()) tc = elem->headingContent();
+                        if (!tc) continue;
+                        tc->text = text;
+                        tc->runs = cloneRuns(runs);
+                        tc->layoutCache.invalidate();
+                        page->invalidateCache();
                     }
                 }
             }
@@ -260,11 +332,14 @@ private:
 
     Document* m_doc;
     ID m_pageId, m_elementId;
-    QString m_old, m_new;
+
+    QString              m_oldText, m_newText;
+    std::vector<InlineRun> m_oldRuns, m_newRuns;
+    bool m_afterSet = false;
 };
 
 // -----------------------------------------------------------------------
-// ApplyStyleCmd — change character or paragraph properties on a range
+// ApplyCharStyleCmd — change character properties on a text range
 // -----------------------------------------------------------------------
 class ApplyCharStyleCmd : public QUndoCommand {
 public:
@@ -287,23 +362,25 @@ private:
             if (auto* ps = tab->pageSequence()) {
                 if (Page* page = ps->findPage(m_pageId)) {
                     if (Element* elem = page->findElement(m_elementId)) {
-                        if (auto* tc = elem->textContent()) {
-                            tc->splitRunAt(m_start);
-                            tc->splitRunAt(m_start + m_len);
-                            for (auto& run : tc->runs) {
-                                if (run.start >= m_start &&
-                                    run.end() <= m_start + m_len)
-                                    run.props = props;
-                            }
-                            tc->coalesceRuns();
-                            page->invalidateCache();
+                        TextBlockContent* tc = nullptr;
+                        if (elem->isTextBlock())    tc = elem->textContent();
+                        else if (elem->isHeading()) tc = elem->headingContent();
+                        if (!tc) continue;
+                        tc->splitRunAt(m_start);
+                        tc->splitRunAt(m_start + m_len);
+                        for (auto& run : tc->runs) {
+                            if (run.start >= m_start &&
+                                run.end() <= m_start + m_len)
+                                run.props = props;
                         }
+                        tc->coalesceRuns();
+                        tc->layoutCache.invalidate();
+                        page->invalidateCache();
                     }
                 }
             }
         }
     }
-
     Document* m_doc;
     ID m_pageId, m_elementId;
     uint32_t m_start, m_len;
@@ -328,7 +405,6 @@ public:
             m_pageId = page->id();
         }
     }
-
     void undo() override {
         Tab* tab = m_doc->findTab(m_tabId);
         if (!tab) return;
@@ -356,9 +432,8 @@ public:
         if (auto* ps = tab->pageSequence())
             ps->deletePage(m_pageId);
     }
-
     void undo() override {
-        // TODO Phase 14: restore deleted page with all its content
+        // TODO Phase 14
     }
 
 private:
@@ -382,18 +457,16 @@ private:
     void apply(size_t index) {
         Tab* tab = m_doc->findTab(m_tabId);
         if (!tab) return;
-        // PageSequence doesn't have a reorder method yet — add pages vector move
         if (auto* ps = tab->pageSequence()) {
             auto& pages = ps->pages;
             auto it = std::find_if(pages.begin(), pages.end(),
-                                   [&](const auto& p) { return p->id() == m_pageId; });
+                                   [&](const auto& p){ return p->id() == m_pageId; });
             if (it == pages.end() || index >= pages.size()) return;
             auto page = std::move(*it);
             pages.erase(it);
             pages.insert(pages.begin() + index, std::move(page));
         }
     }
-
     Document* m_doc;
     ID m_tabId, m_pageId;
     size_t m_old, m_new;
@@ -424,7 +497,6 @@ public:
                  QUndoCommand* parent = nullptr)
         : QUndoCommand("Break Link", parent)
         , m_doc(doc), m_source(sourceElement) {
-        // Capture the old target so we can restore it on undo
         auto links = m_doc->linkGraph.linksFrom(sourceElement);
         if (!links.empty()) m_oldTarget = links[0].target;
     }

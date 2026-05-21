@@ -16,9 +16,9 @@ namespace UDoc {
 // -----------------------------------------------------------------------
 DocumentView::DocumentView(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
-    setFocusPolicy(Qt::StrongFocus);  // needed to receive key events
+    setFocusPolicy(Qt::StrongFocus);
 
-    m_viewState.zoom = 1.0;
+    m_viewState.zoom         = 1.0;
     m_viewState.scrollOffset = QPointF(0, 0);
     m_viewState.visibleRect  = QRectF(0, 0, width(), height());
 
@@ -56,7 +56,7 @@ void DocumentView::switchTab(ID tabId) {
 }
 
 // -----------------------------------------------------------------------
-// Zoom — zoom toward screenOrigin (or viewport centre if not provided)
+// Zoom
 // -----------------------------------------------------------------------
 void DocumentView::setZoom(double zoom, std::optional<QPointF> screenOrigin) {
     zoom = qBound(0.05, zoom, 20.0);
@@ -66,37 +66,15 @@ void DocumentView::setZoom(double zoom, std::optional<QPointF> screenOrigin) {
     QPointF anchor = screenOrigin.value_or(QPointF(width() / 2.0, height() / 2.0));
     const double pagePad = 20.0;
 
-    // === Vertical ===
-    // Page stack Y: screenY_of_content = pagePad - scrollOffset.y
-    // So: scrollOffset.y = pagePad - screenY_of_content
-    // Doc-Y under cursor (in page-stack doc space):
-    //   globalDocY = (anchor.y + scrollOffset.y - pagePad) / oldZoom
-    // After zoom, preserve globalDocY under anchor.y:
-    //   anchor.y = globalDocY * newZoom + pagePad - newScrollOffset.y
-    //   => newScrollOffset.y = globalDocY * newZoom + pagePad - anchor.y
     double globalDocY = (anchor.y() + m_viewState.scrollOffset.y() - pagePad) / oldZoom;
     double newScrollY = globalDocY * zoom + pagePad - anchor.y();
 
-    // === Horizontal ===
-    // Page is horizontally centred: screenPageX = (W - pageW)/2 - scrollOffset.x
-    // where pageW = docPageWidth * zoom.
-    // Doc-X under cursor (page-local):
-    //   pageScreenX = (W - docPageWidth*oldZoom)/2 - scrollOffset.x
-    //   docX = (anchor.x - pageScreenX) / oldZoom
-    // After zoom, preserve docX under anchor.x:
-    //   anchor.x = docX * newZoom + newPageScreenX
-    //   newPageScreenX = (W - docPageWidth*newZoom)/2 - newScrollOffset.x
-    //   => newScrollOffset.x = (W - docPageWidth*newZoom)/2 - (anchor.x - docX*newZoom)
-    //
-    // We need docPageWidth. Get it from the active page, or fall back to 0
-    // (which keeps the page centred correctly even without a page).
     double docPageWidth = 0;
     if (m_document) {
         Tab* tab = m_document->activeTab();
         if (tab) {
-            if (auto* ps = tab->pageSequence()) {
+            if (auto* ps = tab->pageSequence())
                 if (!ps->pages.empty()) docPageWidth = ps->pages[0]->width;
-            }
         }
     }
 
@@ -106,7 +84,7 @@ void DocumentView::setZoom(double zoom, std::optional<QPointF> screenOrigin) {
     double newPageW   = docPageWidth * zoom;
     double newScrollX = (width() - newPageW) / 2.0 - (anchor.x() - docX * zoom);
 
-    m_viewState.zoom = zoom;
+    m_viewState.zoom         = zoom;
     m_viewState.scrollOffset = QPointF(newScrollX, newScrollY);
 
     m_renderEngine.invalidateAll();
@@ -115,12 +93,11 @@ void DocumentView::setZoom(double zoom, std::optional<QPointF> screenOrigin) {
 }
 
 void DocumentView::scrollBy(const QPointF& screenDelta) {
-    m_viewState.scrollOffset -= screenDelta; // subtract: dragging right moves content right
+    m_viewState.scrollOffset -= screenDelta;
     update();
 }
 
 void DocumentView::scrollTo(const QPointF& docPos) {
-    // Centre the given doc position in the viewport
     m_viewState.scrollOffset = QPointF(
         docPos.x() * m_viewState.zoom - width()  / 2.0,
         docPos.y() * m_viewState.zoom - height() / 2.0);
@@ -129,13 +106,11 @@ void DocumentView::scrollTo(const QPointF& docPos) {
 
 void DocumentView::scrollToElement(ID elementId) {
     if (!m_document) return;
-    auto pages = visiblePageRects();
-    for (auto& info : pages) {
+    for (auto& info : visiblePageRects()) {
         if (Element* elem = info.page->findElement(elementId)) {
-            if (elem->bounds) {
-                Rect b = *elem->bounds;
-                scrollTo(QPointF(b.x + b.width / 2, b.y + b.height / 2));
-            }
+            if (elem->bounds)
+                scrollTo(QPointF(elem->bounds->x + elem->bounds->width  / 2,
+                                 elem->bounds->y + elem->bounds->height / 2));
             return;
         }
     }
@@ -145,9 +120,8 @@ void DocumentView::scrollToBookmark(const QString& name) {
     if (!m_document) return;
     Bookmark* bm = m_document->findGlobalBookmark(name);
     if (!bm) return;
-    if (std::holds_alternative<ID>(bm->anchor)) {
+    if (std::holds_alternative<ID>(bm->anchor))
         scrollToElement(std::get<ID>(bm->anchor));
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -155,13 +129,9 @@ void DocumentView::scrollToBookmark(const QString& name) {
 // -----------------------------------------------------------------------
 void DocumentView::selectElement(ID elementId) {
     if (!m_document) return;
-
-    // Deselect old
     applySelectionToElements(false);
-
     m_selection.clear();
 
-    // Find which page owns this element
     Tab* tab = m_document->activeTab();
     if (!tab) return;
 
@@ -174,7 +144,6 @@ void DocumentView::selectElement(ID elementId) {
             }
         }
     }
-
     onSelectionChanged();
 }
 
@@ -196,7 +165,6 @@ void DocumentView::selectElements(const std::vector<ID>& ids) {
             }
         }
     }
-
     onSelectionChanged();
 }
 
@@ -210,6 +178,62 @@ void DocumentView::onSelectionChanged() {
     m_renderEngine.invalidateAll();
     emit selectionChanged(m_selection);
     update();
+}
+
+// -----------------------------------------------------------------------
+// Format application — called from toolbar when user changes bold/size/etc.
+// If we are in text-edit mode, applies to the current selection.
+// If nothing is selected, does nothing.
+// -----------------------------------------------------------------------
+void DocumentView::applyCharFormat(const CharacterProperties& props) {
+    if (!m_document) return;
+
+    Tab* tab = m_document->activeTab();
+    if (!tab) return;
+
+    // In text-edit mode the input handler owns the text editor.
+    // We reach into it via the element's layout cache selection range.
+    auto* ps = tab->pageSequence();
+    if (!ps) return;
+
+    for (auto& page : ps->pages) {
+        for (ID id : m_selection.elementIds) {
+            if (Element* elem = page->findElement(id)) {
+                TextBlockContent* tc = nullptr;
+                if (elem->isTextBlock())   tc = elem->textContent();
+                else if (elem->isHeading()) tc = elem->headingContent();
+                if (!tc) continue;
+
+                uint32_t s = tc->layoutCache.selStart;
+                uint32_t e = tc->layoutCache.selEnd;
+
+                if (s == e) {
+                    // No text selection — apply to whole element
+                    s = 0;
+                    e = (uint32_t)tc->text.length();
+                }
+                if (s >= e) continue;
+
+                // Push an undo command
+                CharacterProperties oldProps = tc->runs.empty()
+                    ? CharacterProperties()
+                    : tc->runs[0].props;
+
+                m_commandStack.run(
+                    new ApplyCharStyleCmd(m_document,
+                                          page->id(), id,
+                                          s, e - s,
+                                          oldProps, props));
+
+                page->invalidateCache();
+                m_renderEngine.invalidateAll();
+                update();
+
+                // Emit so the toolbar reflects the new state
+                emit textFormatChanged(props);
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -249,8 +273,6 @@ QPointF DocumentView::screenToDoc(const QPointF& screenPoint) const {
     return (screenPoint + m_viewState.scrollOffset) / m_viewState.zoom;
 }
 
-// Returns all pages with their current screen rectangles.
-// The layout mirrors renderPageSequence: pages stacked vertically, centred.
 std::vector<DocumentView::PageScreenInfo> DocumentView::visiblePageRects() const {
     std::vector<PageScreenInfo> result;
     if (!m_document) return result;
@@ -266,16 +288,12 @@ std::vector<DocumentView::PageScreenInfo> DocumentView::visiblePageRects() const
     double screenY = pagePad - m_viewState.scrollOffset.y();
 
     for (auto& page : ps->pages) {
-        double pageW = page->width  * zoom;
-        double pageH = page->height * zoom;
+        double pageW  = page->width  * zoom;
+        double pageH  = page->height * zoom;
         double screenX = (width() - pageW) / 2.0 - m_viewState.scrollOffset.x();
-
-        QRectF screenRect(screenX, screenY, pageW, pageH);
-        result.push_back({ page.get(), screenRect });
-
+        result.push_back({ page.get(), QRectF(screenX, screenY, pageW, pageH) });
         screenY += pageH + pagePad;
     }
-
     return result;
 }
 
@@ -284,20 +302,20 @@ std::vector<DocumentView::PageScreenInfo> DocumentView::visiblePageRects() const
 // -----------------------------------------------------------------------
 void DocumentView::rebuildInputHandler() {
     if (!m_document) { m_inputHandler.reset(); return; }
-
     Tab* tab = m_document->activeTab();
-    if (!tab)        { m_inputHandler.reset(); return; }
+    if (!tab) { m_inputHandler.reset(); return; }
 
-    // For now only PageSequence gets a real handler;
-    // other tab types get nullptr (Phase 12/13).
     if (tab->pageSequence()) {
-        m_inputHandler = std::make_unique<PageSequenceInputHandler>(this);
+        // Preserve existing handler if it's already a PageSequenceInputHandler
+        // so the text editor state survives mode changes (e.g. toolbar clicks)
+        auto* existing = dynamic_cast<PageSequenceInputHandler*>(m_inputHandler.get());
+        if (!existing)
+            m_inputHandler = std::make_unique<PageSequenceInputHandler>(this);
     } else {
         m_inputHandler.reset();
     }
 }
 
-// Set the selected flag on all elements in the current selection
 void DocumentView::applySelectionToElements(bool selected) {
     if (!m_document || m_selection.isEmpty()) return;
     Tab* tab = m_document->activeTab();
@@ -318,7 +336,6 @@ void DocumentView::applySelectionToElements(bool selected) {
 // -----------------------------------------------------------------------
 void DocumentView::paintEvent(QPaintEvent* event) {
     QWidget::paintEvent(event);
-
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing);
@@ -326,25 +343,23 @@ void DocumentView::paintEvent(QPaintEvent* event) {
 
     m_viewState.visibleRect = QRectF(0, 0, width(), height());
 
-    if (m_document) {
+    if (m_document)
         m_renderEngine.renderViewport(&painter, m_viewState, m_document);
-    } else {
+    else {
         painter.setPen(Qt::darkGray);
         painter.drawText(rect(), Qt::AlignCenter, "No document loaded");
     }
 }
 
 // -----------------------------------------------------------------------
-// Events — pan is always on middle mouse; other input goes to handler
+// Events
 // -----------------------------------------------------------------------
 void DocumentView::wheelEvent(QWheelEvent* event) {
     if (event->modifiers() & Qt::ControlModifier) {
-        // Zoom toward cursor
         double delta  = event->angleDelta().y() / 120.0;
         double factor = 1.0 + delta * 0.1;
         setZoom(m_viewState.zoom * factor, event->position());
     } else {
-        // Scroll
         scrollBy(-QPointF(event->angleDelta().x() / 2.0,
                           event->angleDelta().y() / 2.0));
     }
@@ -352,10 +367,11 @@ void DocumentView::wheelEvent(QWheelEvent* event) {
 }
 
 void DocumentView::mousePressEvent(QMouseEvent* event) {
-    // Middle mouse (or Shift+Left) = pan, always
+    // Middle mouse or Shift+Left = pan
     if (event->button() == Qt::MiddleButton ||
         (event->button() == Qt::LeftButton &&
-         event->modifiers() & Qt::ShiftModifier)) {
+         event->modifiers() & Qt::ShiftModifier &&
+         m_mode != EditMode::TextEdit)) {
         m_panning      = true;
         m_lastMousePos = event->position();
         setCursor(Qt::ClosedHandCursor);
@@ -397,17 +413,34 @@ void DocumentView::mouseReleaseEvent(QMouseEvent* event) {
     if (m_inputHandler) m_inputHandler->mouseReleaseEvent(event);
 }
 
+// ---- Double click → routed to handler ----
+void DocumentView::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (m_inputHandler) m_inputHandler->mouseDoubleClickEvent(event);
+}
+
 void DocumentView::keyPressEvent(QKeyEvent* event) {
-    // Undo / Redo
+    // Undo / Redo — always available
     if (event->matches(QKeySequence::Undo)) {
         undo(); event->accept(); return;
     }
     if (event->matches(QKeySequence::Redo)) {
         redo(); event->accept(); return;
     }
-    // Delete selected elements
-    if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)
-        && !m_selection.isEmpty()) {
+
+    // Escape always clears selection and exits text edit
+    if (event->key() == Qt::Key_Escape) {
+        if (auto* ph = dynamic_cast<PageSequenceInputHandler*>(m_inputHandler.get()))
+            ph->exitTextEdit();
+        clearSelection();
+        setMode(EditMode::Select);
+        event->accept();
+        return;
+    }
+
+    // Delete/Backspace on selected elements (not in text-edit mode)
+    if (m_mode != EditMode::TextEdit &&
+        (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
+        !m_selection.isEmpty()) {
         Tab* tab = m_document ? m_document->activeTab() : nullptr;
         if (tab) {
             if (auto* ps = tab->pageSequence()) {
@@ -415,8 +448,8 @@ void DocumentView::keyPressEvent(QKeyEvent* event) {
                 for (ID id : m_selection.elementIds) {
                     for (auto& page : ps->pages) {
                         if (page->findElement(id)) {
-                            m_commandStack.run(new DeleteElementCmd(
-                                m_document, page->id(), id));
+                            m_commandStack.run(
+                                new DeleteElementCmd(m_document, page->id(), id));
                             break;
                         }
                     }
@@ -428,11 +461,7 @@ void DocumentView::keyPressEvent(QKeyEvent* event) {
         event->accept();
         return;
     }
-    if (event->key() == Qt::Key_Escape) {
-        clearSelection();
-        event->accept();
-        return;
-    }
+
     if (m_inputHandler) m_inputHandler->keyPressEvent(event);
 }
 
