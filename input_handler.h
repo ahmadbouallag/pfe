@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QObject>
 #include <QTextLayout>
+#include <QMenu>
 #include <memory>
 
 namespace UDoc {
@@ -193,6 +194,19 @@ private:
 
     // ---- Enter text edit mode ----
     void enterTextEdit(Element* element, const QPointF& screenPos);
+
+    // Create a new text element at a page-local position and enter edit mode.
+    // This is what happens when you click on blank page space — Word-style.
+    void insertTextAtPagePoint(Page* page, const Point& pageLocalPos);
+
+    // Right-click context menu
+    void showContextMenu(const QPointF& screenPos, Page* page, Element* element);
+
+    // Insert helpers (called from context menu)
+    void insertHeading(Page* page, const Point& pos, int level);
+    void insertTextBlock(Page* page, const Point& pos);
+    void insertHRule(Page* page, const Point& pos);
+    void insertImage(Page* page, const Point& pos);
 
     // ---- Helpers ----
     Page*    pageForElement(ID elementId) const;

@@ -13,6 +13,11 @@
 #include <QClipboard>
 #include <QTextLayout>
 #include <QFontMetricsF>
+#include <QMenu>
+#include <QFileDialog>
+#include <QFile>
+#include "image.h"
+#include "vector.h"
 #include <algorithm>
 
 namespace UDoc {
@@ -565,17 +570,26 @@ Page* PageSequenceInputHandler::pageForElement(ID elementId) const {
 // ---- Mouse press ----
 
 void PageSequenceInputHandler::mousePressEvent(QMouseEvent* event) {
-    if (event->button() != Qt::LeftButton) return;
-
     Document* doc = m_view->document();
     if (!doc) return;
 
     auto [page, element] = hitTest(event->position());
 
+    // ---- Right-click → context menu ----
+    if (event->button() == Qt::RightButton) {
+        if (m_textEditor && element != m_textEditor->element())
+            exitTextEdit();
+        showContextMenu(event->position(), page, element);
+        event->accept();
+        return;
+    }
+
+    if (event->button() != Qt::LeftButton) return;
+
     // ---- If we are in text-edit mode ----
     if (m_textEditor) {
-        // Click inside the same element → place cursor
         if (element && element == m_textEditor->element()) {
+            // Click inside the same element → place cursor
             QRectF sr = pageScreenRect(page);
             Point local = screenToPageLocal(event->position(), page, sr);
             QPointF localQ(local.x - m_textEditor->element()->bounds->x,
@@ -588,8 +602,6 @@ void PageSequenceInputHandler::mousePressEvent(QMouseEvent* event) {
         // Click outside → commit and exit text edit
         exitTextEdit();
     }
-
-    EditMode mode = m_view->mode();
 
     if (element) {
         bool shift = event->modifiers() & Qt::ShiftModifier;
@@ -610,19 +622,26 @@ void PageSequenceInputHandler::mousePressEvent(QMouseEvent* event) {
 
         // Begin drag if not locked
         if (!element->locked) {
-            m_draggingElement = true;
-            m_dragStartScreen = event->position();
-            m_dragStartDocPos = element->bounds
+            m_draggingElement  = true;
+            m_dragStartScreen  = event->position();
+            m_dragStartDocPos  = element->bounds
                 ? Point(element->bounds->x, element->bounds->y)
                 : Point(0, 0);
         }
+    } else if (page) {
+        // ---- Click on blank page space ----
+        // Word-style: single click on blank area → create a text element
+        // there and immediately enter edit mode.
+        if (!(event->modifiers() & Qt::ShiftModifier)) {
+            m_view->clearSelection();
+            QRectF sr = pageScreenRect(page);
+            Point local = screenToPageLocal(event->position(), page, sr);
+            insertTextAtPagePoint(page, local);
+        }
     } else {
-        // Click on empty page — start rubber-band
+        // Click outside any page — just clear selection
         if (!(event->modifiers() & Qt::ShiftModifier))
             m_view->clearSelection();
-        m_rubberBanding = true;
-        m_rubberStart = m_rubberCurrent = event->position();
-        m_view->showRubberBand(QRectF(m_rubberStart, m_rubberStart));
     }
 
     event->accept();
@@ -997,4 +1016,309 @@ QCursor PageSequenceInputHandler::cursor() const {
     }
 }
 
+
+// ============================================================
+//  Insert text element at page-local position — Word-style click-to-type
+// ============================================================
+
+void PageSequenceInputHandler::insertTextAtPagePoint(Page* page, const Point& pos) {
+    Document* doc = m_view->document();
+    if (!doc || !page) return;
+
+    // Default text element: full content width, auto height.
+    // Position it at the click point, snapped to a sensible top-left.
+    double pageMargin = 60.0;
+    double elemX = std::max(pageMargin, std::min(pos.x, page->width - pageMargin * 2));
+    double elemY = std::max(pageMargin, pos.y);
+    double elemW = page->width - elemX - pageMargin;
+    double elemH = 24.0;  // one line height; will grow as user types
+
+    auto elem = std::make_unique<Element>(doc->generateId());
+    elem->bounds = Rect(elemX, elemY, elemW, elemH);
+
+    TextBlockContent tc;
+    CharacterProperties props;
+    props.fontFamily = "Arial";
+    props.fontSize   = 12.0;
+    tc.setPlainText("", props);
+    elem->content = std::move(tc);
+
+    ID newElemId = elem->id();
+    Element* raw = elem.get();
+    page->addElement(std::move(elem));
+
+    // Select it and enter text edit immediately
+    m_view->selectElement(newElemId);
+    m_view->renderEngine().invalidateAll();
+
+    m_textEditor = std::make_unique<TextEditor>(m_view, raw);
+    m_view->setMode(EditMode::TextEdit);
+    m_view->update();
+}
+
+// ============================================================
+//  Insert heading
+// ============================================================
+
+void PageSequenceInputHandler::insertHeading(Page* page, const Point& pos, int level) {
+    Document* doc = m_view->document();
+    if (!doc || !page) return;
+
+    double pageMargin = 60.0;
+    double fontSize   = (level == 1) ? 24.0 : (level == 2) ? 18.0 : 14.0;
+    double elemX = pageMargin;
+    double elemY = pos.y;
+    double elemW = page->width - pageMargin * 2;
+    double elemH = fontSize * 1.6;
+
+    auto elem = std::make_unique<Element>(doc->generateId());
+    elem->bounds = Rect(elemX, elemY, elemW, elemH);
+
+    HeadingContent hc;
+    CharacterProperties props;
+    props.fontFamily = "Arial";
+    props.fontSize   = fontSize;
+    props.bold       = true;
+    hc.setPlainText("", props);
+    hc.outlineLevel  = level;
+    elem->content = std::move(hc);
+
+    ID headingElemId = elem->id();
+    Element* raw = elem.get();
+    page->addElement(std::move(elem));
+
+    m_view->selectElement(headingElemId);
+    m_view->renderEngine().invalidateAll();
+
+    m_textEditor = std::make_unique<TextEditor>(m_view, raw);
+    m_view->setMode(EditMode::TextEdit);
+    m_view->update();
+}
+
+// ============================================================
+//  Insert plain text block (from menu)
+// ============================================================
+
+void PageSequenceInputHandler::insertTextBlock(Page* page, const Point& pos) {
+    insertTextAtPagePoint(page, pos);
+}
+
+// ============================================================
+//  Insert horizontal rule
+// ============================================================
+
+void PageSequenceInputHandler::insertHRule(Page* page, const Point& pos) {
+    Document* doc = m_view->document();
+    if (!doc || !page) return;
+
+    double pageMargin = 60.0;
+    double x = pageMargin;
+    double y = pos.y;
+    double w = page->width - pageMargin * 2;
+    double h = 2.0;
+
+    // Represent as a thin filled VectorGraphic rectangle
+    VectorGraphic vg;
+    UDoc::PathCommand m, l1, l2, l3, cl;
+    m.type  = PathCommandType::MoveTo;  m.x1  = 0; m.y1  = 0;
+    l1.type = PathCommandType::LineTo;  l1.x1 = w; l1.y1 = 0;
+    l2.type = PathCommandType::LineTo;  l2.x1 = w; l2.y1 = h;
+    l3.type = PathCommandType::LineTo;  l3.x1 = 0; l3.y1 = h;
+    cl.type = PathCommandType::ClosePath;
+    vg.commands = {m, l1, l2, l3, cl};
+
+    UDoc::Fill fill;
+    fill.content = UDoc::Color(0.7, 0.7, 0.7, 1.0);
+    fill.opacity = 1.0;
+    vg.fill = fill;
+
+    auto elem = std::make_unique<Element>(doc->generateId());
+    elem->bounds  = Rect(x, y, w, h);
+    elem->content = std::move(vg);
+
+    m_view->clearSelection();
+    m_view->renderEngine().invalidateAll();
+    page->addElement(std::move(elem));
+    m_view->update();
+}
+
+// ============================================================
+//  Insert image from file dialog
+// ============================================================
+
+void PageSequenceInputHandler::insertImage(Page* page, const Point& pos) {
+    Document* doc = m_view->document();
+    if (!doc || !page) return;
+
+    QString path = QFileDialog::getOpenFileName(
+        m_view, "Insert Image", QString(),
+        "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return;
+    QByteArray ba = file.readAll();
+
+    auto imgData = std::make_shared<ImageData>();
+    imgData->rawBytes.assign(
+        reinterpret_cast<const uint8_t*>(ba.constData()),
+        reinterpret_cast<const uint8_t*>(ba.constData()) + ba.size());
+
+    // Detect format from extension
+    QString lower = path.toLower();
+    if      (lower.endsWith(".png"))              imgData->format = ImageFormat::PNG;
+    else if (lower.endsWith(".jpg")||lower.endsWith(".jpeg")) imgData->format = ImageFormat::JPEG;
+    else if (lower.endsWith(".bmp"))              imgData->format = ImageFormat::BMP;
+    else if (lower.endsWith(".gif"))              imgData->format = ImageFormat::GIF;
+    else                                           imgData->format = ImageFormat::Unknown;
+
+    // Decode to get natural dimensions
+    QImage decoded = imgData->getDecoded();
+    double dispW = decoded.isNull() ? 200.0 : std::min((double)decoded.width(),  page->width  - 120.0);
+    double dispH = decoded.isNull() ? 150.0 : std::min((double)decoded.height(), page->height - 120.0);
+
+    UDoc::Image img;
+    img.data          = imgData;
+    img.displayWidth  = dispW;
+    img.displayHeight = dispH;
+
+    double pageMargin = 60.0;
+    double x = std::max(pageMargin, pos.x);
+    double y = std::max(pageMargin, pos.y);
+
+    auto elem = std::make_unique<Element>(doc->generateId());
+    elem->bounds  = Rect(x, y, dispW, dispH);
+    elem->content = std::move(img);
+
+    ID newId = elem->id();
+    page->addElement(std::move(elem));
+    m_view->selectElement(newId);
+    m_view->renderEngine().invalidateAll();
+    m_view->update();
+}
+
+// ============================================================
+//  Right-click context menu
+// ============================================================
+
+void PageSequenceInputHandler::showContextMenu(const QPointF& screenPos,
+                                                Page* page,
+                                                Element* element) {
+    QMenu menu(m_view);
+
+    // ---- Element-specific actions ----
+    if (element) {
+        if (element->isEditableText()) {
+            menu.addAction("✏  Edit Text", m_view, [this, element, screenPos](){
+                enterTextEdit(element, screenPos);
+            });
+            menu.addSeparator();
+        }
+
+        QAction* cutAct = menu.addAction("✂  Cut",    m_view, [this, element](){
+            m_view->clearSelection();
+            m_view->selectElement(element->id());
+            // Copy text to clipboard if text element
+            if (auto* tc = element->textContent()) {
+                QApplication::clipboard()->setText(tc->text);
+            }
+            ID pageId = m_view->selection().pageId;
+            m_view->commandStack()->run(
+                new DeleteElementCmd(m_view->document(), pageId, element->id()));
+            m_view->clearSelection();
+            m_view->renderEngine().invalidateAll();
+            m_view->update();
+        });
+        cutAct->setShortcut(QKeySequence::Cut);
+
+        QAction* copyAct = menu.addAction("⎘  Copy", m_view, [this, element](){
+            if (auto* tc = element->textContent())
+                QApplication::clipboard()->setText(tc->text);
+        });
+        copyAct->setShortcut(QKeySequence::Copy);
+
+        menu.addSeparator();
+
+        QAction* delAct = menu.addAction("🗑  Delete Element", m_view, [this, element](){
+            ID pageId = m_view->selection().pageId;
+            if (pageId == NULL_ID) {
+                // Find page
+                Page* p = pageForElement(element->id());
+                if (p) pageId = p->id();
+            }
+            m_view->commandStack()->run(
+                new DeleteElementCmd(m_view->document(), pageId, element->id()));
+            m_view->clearSelection();
+            m_view->renderEngine().invalidateAll();
+            m_view->update();
+        });
+        delAct->setShortcut(Qt::Key_Delete);
+
+        menu.addSeparator();
+    }
+
+    // ---- Insert submenu (always shown when on a page) ----
+    if (page) {
+        QRectF sr = pageScreenRect(page);
+        Point localPos = screenToPageLocal(screenPos, page, sr);
+
+        QMenu* insertMenu = menu.addMenu("➕  Insert");
+
+        insertMenu->addAction("📝  Text Box", m_view, [this, page, localPos](){
+            insertTextBlock(page, localPos);
+        });
+
+        QMenu* headingMenu = insertMenu->addMenu("🔤  Heading");
+        headingMenu->addAction("H1 — Title",    m_view, [this, page, localPos](){ insertHeading(page, localPos, 1); });
+        headingMenu->addAction("H2 — Section",  m_view, [this, page, localPos](){ insertHeading(page, localPos, 2); });
+        headingMenu->addAction("H3 — Subsection",m_view,[this, page, localPos](){ insertHeading(page, localPos, 3); });
+
+        insertMenu->addSeparator();
+
+        insertMenu->addAction("🖼  Image…", m_view, [this, page, localPos](){
+            insertImage(page, localPos);
+        });
+
+        insertMenu->addAction("━  Horizontal Rule", m_view, [this, page, localPos](){
+            insertHRule(page, localPos);
+        });
+
+        menu.addSeparator();
+    }
+
+    // ---- Paste (always) ----
+    {
+        QString clipText = QApplication::clipboard()->text();
+        QAction* pasteAct = menu.addAction("📋  Paste", m_view, [this, page, screenPos, clipText](){
+            if (clipText.isEmpty() || !page) return;
+            // If in text edit mode, paste into editor
+            if (m_textEditor) {
+                m_textEditor->paste();
+                return;
+            }
+            // Otherwise paste as a new text element
+            QRectF sr = pageScreenRect(page);
+            Point local = screenToPageLocal(screenPos, page, sr);
+            insertTextAtPagePoint(page, local);
+            if (m_textEditor) m_textEditor->insertText(clipText);
+        });
+        pasteAct->setShortcut(QKeySequence::Paste);
+        pasteAct->setEnabled(!clipText.isEmpty());
+    }
+
+    // ---- Undo / Redo ----
+    menu.addSeparator();
+    QAction* undoAct = menu.addAction("↩  Undo", m_view, [this](){
+        if (m_textEditor) m_textEditor->commit();
+        m_view->undo();
+    });
+    undoAct->setShortcut(QKeySequence::Undo);
+    undoAct->setEnabled(m_view->commandStack()->canUndo());
+
+    QAction* redoAct = menu.addAction("↪  Redo", m_view, [this](){ m_view->redo(); });
+    redoAct->setShortcut(QKeySequence::Redo);
+    redoAct->setEnabled(m_view->commandStack()->canRedo());
+
+    menu.exec(m_view->mapToGlobal(screenPos.toPoint()));
+}
 } // namespace UDoc
